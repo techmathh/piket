@@ -16,7 +16,7 @@ import {
   type PiketSchedule,
 } from '../utils/piketLogic';
 import { CharacterAvatar3D } from './CharacterAvatar3D';
-import mascotHeroImg from '../assets/images/osis_mascot_hero_1794405496474.jpg';
+import { mascotHeroImg } from '../assets/brandAssets';
 
 interface MemberManagerProps {
   members: OsisMember[];

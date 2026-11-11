@@ -4,7 +4,7 @@ import {
   authenticateAccount,
   type AppAccount,
 } from '../utils/piketLogic';
-import mascotHeroImg from '../assets/images/osis_mascot_hero_1794405496474.jpg';
+import { mascotHeroImg } from '../assets/brandAssets';
 
 interface AdminLoginModalProps {
   accounts: AppAccount[];

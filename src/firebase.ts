@@ -17,7 +17,6 @@ import {
   getDocFromServer,
   writeBatch,
 } from 'firebase/firestore';
-import firebaseConfig from '../firebase-applet-config.json';
 import {
   PERMANENT_DEVELOPER_ACCOUNT,
   canDeleteAccount,
@@ -27,6 +26,29 @@ import {
   type PiketSchedule,
   type ScheduleSwap,
 } from './utils/piketLogic';
+
+const firebaseConfig = {
+  projectId:
+    import.meta.env.VITE_FIREBASE_PROJECT_ID || 'digital-web-7s7sz',
+  appId:
+    import.meta.env.VITE_FIREBASE_APP_ID ||
+    '1:600016534856:web:da2b5c85ad03a59e58477d',
+  apiKey:
+    import.meta.env.VITE_FIREBASE_API_KEY ||
+    'AIzaSyAvo1cYV60p8ID9RJKvQxkdPGimqUs4A6s',
+  authDomain:
+    import.meta.env.VITE_FIREBASE_AUTH_DOMAIN ||
+    'digital-web-7s7sz.firebaseapp.com',
+  firestoreDatabaseId:
+    import.meta.env.VITE_FIREBASE_DATABASE_ID ||
+    'ai-studio-osispikettracker-91d7bbc8-4846-4163-8084-06211ffadcdd',
+  storageBucket:
+    import.meta.env.VITE_FIREBASE_STORAGE_BUCKET ||
+    'digital-web-7s7sz.firebasestorage.app',
+  messagingSenderId:
+    import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '600016534856',
+  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID || '',
+};
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);

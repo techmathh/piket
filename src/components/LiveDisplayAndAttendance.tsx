@@ -23,8 +23,7 @@ import {
   type ResolvedScheduleForDate,
 } from '../utils/piketLogic';
 import { CharacterAvatar3D } from './CharacterAvatar3D';
-import mascotHeroImg from '../assets/images/osis_mascot_hero_1794405496474.jpg';
-import banner3dImg from '../assets/images/osis_3d_banner_1794405497564.jpg';
+import { mascotHeroImg, banner3dImg } from '../assets/brandAssets';
 
 interface LiveDisplayAndAttendanceProps {
   todayStr: string;

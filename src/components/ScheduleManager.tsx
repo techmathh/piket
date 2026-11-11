@@ -18,7 +18,7 @@ import {
   type ScheduleMode,
   type ScheduleSwap,
 } from '../utils/piketLogic';
-import banner3dImg from '../assets/images/osis_3d_banner_1794405497564.jpg';
+import { banner3dImg } from '../assets/brandAssets';
 
 interface ScheduleManagerProps {
   todayStr: string;
