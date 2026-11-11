@@ -1,0 +1,155 @@
+{
+  "entities": {
+    "OsisMember": {
+      "title": "OsisMember",
+      "description": "Data pengurus dan petugas piket OSIS",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "ID unik anggota OSIS" },
+        "name": { "type": "string", "description": "Nama lengkap pengurus OSIS" },
+        "kelas": { "type": "string", "description": "Kelas pengurus (misal XI MIPA 1)" },
+        "jabatan": { "type": "string", "description": "Jabatan BPH atau Seksi Bidang" },
+        "phone": { "type": "string", "description": "Nomor kontak atau WhatsApp" },
+        "active": { "type": "boolean", "description": "Status keaktifan anggota" }
+      },
+      "required": ["id", "name", "kelas", "jabatan", "phone", "active"]
+    },
+    "PiketSchedule": {
+      "title": "PiketSchedule",
+      "description": "Jadwal piket OSIS (harian, mingguan, atau custom beserta siklus minggu 1-4)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "location": { "type": "string" },
+        "startTime": { "type": "string" },
+        "endTime": { "type": "string" },
+        "mode": { "type": "string", "enum": ["harian", "mingguan", "custom"] },
+        "tasks": { "type": "array", "items": { "type": "string" } },
+        "activeWeeks": { "type": "array", "items": { "type": "number" } },
+        "activeDays": { "type": "array", "items": { "type": "number" } },
+        "dailyMembers": { "type": "array", "items": { "type": "string" } },
+        "weeklyAssignments": { "type": "object" },
+        "customDates": { "type": "array", "items": { "type": "string" } },
+        "customDateAssignments": { "type": "object" }
+      },
+      "required": [
+        "id",
+        "title",
+        "description",
+        "location",
+        "startTime",
+        "endTime",
+        "mode",
+        "tasks",
+        "activeWeeks",
+        "activeDays",
+        "dailyMembers",
+        "weeklyAssignments",
+        "customDates",
+        "customDateAssignments"
+      ]
+    },
+    "ScheduleSwap": {
+      "title": "ScheduleSwap",
+      "description": "Catatan pertukaran atau penggantian petugas piket sementara",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "date": { "type": "string" },
+        "scheduleId": { "type": "string" },
+        "originalMemberId": { "type": "string" },
+        "replacementMemberId": { "type": "string" },
+        "reason": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": [
+        "id",
+        "date",
+        "scheduleId",
+        "originalMemberId",
+        "replacementMemberId",
+        "reason",
+        "createdAt"
+      ]
+    },
+    "AttendanceRecord": {
+      "title": "AttendanceRecord",
+      "description": "Catatan presensi kehadiran petugas piket OSIS",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "date": { "type": "string" },
+        "scheduleId": { "type": "string" },
+        "memberId": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": ["hadir", "terlambat", "izin", "sakit", "tidak_piket", "belum_absen"]
+        },
+        "checkInTime": { "type": "string" },
+        "note": { "type": "string" },
+        "recordedBy": { "type": "string" }
+      },
+      "required": [
+        "id",
+        "date",
+        "scheduleId",
+        "memberId",
+        "status",
+        "checkInTime",
+        "note",
+        "recordedBy"
+      ]
+    },
+    "AppAccount": {
+      "title": "AppAccount",
+      "description": "Akun pengguna untuk akses Admin Panel (role developer permanen dan role admin)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "username": { "type": "string" },
+        "password": { "type": "string" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["developer", "admin"] },
+        "isProtected": { "type": "boolean" },
+        "createdAt": { "type": "string" }
+      },
+      "required": [
+        "id",
+        "username",
+        "password",
+        "displayName",
+        "role",
+        "isProtected",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/members/{memberId}": {
+      "schema": { "$ref": "#/entities/OsisMember" },
+      "description": "Koleksi anggota piket OSIS"
+    },
+    "/schedules/{scheduleId}": {
+      "schema": { "$ref": "#/entities/PiketSchedule" },
+      "description": "Koleksi jadwal piket OSIS"
+    },
+    "/swaps/{swapId}": {
+      "schema": { "$ref": "#/entities/ScheduleSwap" },
+      "description": "Koleksi pertukaran jadwal sementara"
+    },
+    "/attendance/{attendanceId}": {
+      "schema": { "$ref": "#/entities/AttendanceRecord" },
+      "description": "Koleksi catatan absensi piket OSIS"
+    },
+    "/accounts/{accountId}": {
+      "schema": { "$ref": "#/entities/AppAccount" },
+      "description": "Koleksi akun login developer dan admin OSIS"
+    },
+    "/admins/{adminId}": {
+      "schema": { "type": "object" },
+      "description": "Koleksi daftar admin pengurus OSIS"
+    }
+  }
+}

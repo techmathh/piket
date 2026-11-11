@@ -1,0 +1,108 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-display: "Fredoka", "Plus Jakarta Sans", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+@layer base {
+  body {
+    font-family: var(--font-sans);
+    background-color: #FFF9F2;
+    color: #292524;
+  }
+
+  h1, h2, h3, .font-display {
+    font-family: var(--font-display);
+  }
+
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Tactile 3D Claymorphic / Toy Theme Surfaces */
+.card-3d {
+  background-color: #FFFFFF;
+  border: 2px solid #F3E3D0;
+  border-radius: 1.5rem;
+  box-shadow: 0 6px 0 0 #E8D2B8, 0 10px 24px -6px rgba(180, 130, 80, 0.12);
+}
+
+.card-3d-soft {
+  background-color: #FFFDF9;
+  border: 2px solid #F3E3D0;
+  border-radius: 1.25rem;
+  box-shadow: 0 4px 0 0 #EBD7C0;
+}
+
+.card-3d-sky {
+  background-color: #F4FAFF;
+  border: 2px solid #C6E3FA;
+  border-radius: 1.5rem;
+  box-shadow: 0 6px 0 0 #AED5F5, 0 10px 24px -6px rgba(56, 142, 220, 0.12);
+}
+
+.card-3d-mint {
+  background-color: #F2FBF7;
+  border: 2px solid #BDEBD5;
+  border-radius: 1.25rem;
+  box-shadow: 0 5px 0 0 #A2DFC3;
+}
+
+.btn-3d-primary {
+  background: linear-gradient(180deg, #FF8A4C 0%, #F97316 100%);
+  color: #FFFFFF;
+  border: 2px solid #EA580C;
+  border-radius: 0.9rem;
+  box-shadow: 0 4px 0 0 #C2410C;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.btn-3d-primary:hover {
+  background: linear-gradient(180deg, #FF965E 0%, #FB7E24 100%);
+}
+
+.btn-3d-primary:active {
+  transform: translateY(2px);
+  box-shadow: 0 2px 0 0 #C2410C;
+}
+
+.btn-3d-secondary {
+  background: linear-gradient(180deg, #FFFFFF 0%, #FFF7ED 100%);
+  color: #57534E;
+  border: 2px solid #E7D5C0;
+  border-radius: 0.9rem;
+  box-shadow: 0 4px 0 0 #D8C0A6;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.btn-3d-secondary:hover {
+  background: linear-gradient(180deg, #FFFDF9 0%, #FFEDD5 100%);
+  color: #292524;
+}
+
+.btn-3d-secondary:active {
+  transform: translateY(2px);
+  box-shadow: 0 2px 0 0 #D8C0A6;
+}
+
+.btn-3d-sky {
+  background: linear-gradient(180deg, #38BDF8 0%, #0284C7 100%);
+  color: #FFFFFF;
+  border: 2px solid #0369A1;
+  border-radius: 0.9rem;
+  box-shadow: 0 4px 0 0 #075985;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.btn-3d-sky:hover {
+  background: linear-gradient(180deg, #52C8FA 0%, #0391D8 100%);
+}
+
+.btn-3d-sky:active {
+  transform: translateY(2px);
+  box-shadow: 0 2px 0 0 #075985;
+}
+

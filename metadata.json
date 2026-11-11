@@ -1,0 +1,6 @@
+{
+  "name": "SiPiket OSIS — Sistem Display & Absensi Piket Pengurus OSIS",
+  "description": "Aplikasi layar display jadwal piket harian, pencatatan absensi pengurus OSIS, manajemen multi-jadwal (harian, mingguan, custom), pergantian jadwal, dan rekapitulasi mingguan serta bulanan.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

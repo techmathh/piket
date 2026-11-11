@@ -1,0 +1,167 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 1. Helper Functions
+    function isAuthenticated() {
+      return request.auth != null && request.time != null;
+    }
+
+    function isRequestValidTime() {
+      return request.time is timestamp;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+         (request.auth.token.email == "saqilakhalifah@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function isValidMember(data, memberId) {
+      return data.keys().hasAll(['id', 'name', 'kelas', 'jabatan', 'phone', 'active']) &&
+             data.keys().hasOnly(['id', 'name', 'kelas', 'jabatan', 'phone', 'active']) &&
+             data.id is string && data.id == memberId && data.id.size() > 0 && data.id.size() <= 100 &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 120 &&
+             data.kelas is string && data.kelas.size() > 0 && data.kelas.size() <= 60 &&
+             data.jabatan is string && data.jabatan.size() > 0 && data.jabatan.size() <= 120 &&
+             data.phone is string && data.phone.size() > 0 && data.phone.size() <= 50 &&
+             data.active is bool;
+    }
+
+    function isValidSchedule(data, scheduleId) {
+      return data.keys().hasAll([
+               'id', 'title', 'description', 'location', 'startTime', 'endTime',
+               'mode', 'tasks', 'activeWeeks', 'activeDays', 'dailyMembers',
+               'weeklyAssignments', 'customDates', 'customDateAssignments'
+             ]) &&
+             data.keys().hasOnly([
+               'id', 'title', 'description', 'location', 'startTime', 'endTime',
+               'mode', 'tasks', 'activeWeeks', 'activeDays', 'dailyMembers',
+               'weeklyAssignments', 'customDates', 'customDateAssignments'
+             ]) &&
+             data.id is string && data.id == scheduleId && data.id.size() > 0 && data.id.size() <= 100 &&
+             data.title is string && data.title.size() > 0 && data.title.size() <= 150 &&
+             data.description is string && data.description.size() <= 500 &&
+             data.location is string && data.location.size() > 0 && data.location.size() <= 150 &&
+             data.startTime is string && data.startTime.size() > 0 && data.startTime.size() <= 20 &&
+             data.endTime is string && data.endTime.size() > 0 && data.endTime.size() <= 20 &&
+             data.mode in ['harian', 'mingguan', 'custom'] &&
+             data.tasks is list && data.tasks.size() <= 50 &&
+             data.activeWeeks is list && data.activeWeeks.size() <= 10 &&
+             data.activeDays is list && data.activeDays.size() <= 10 &&
+             data.dailyMembers is list && data.dailyMembers.size() <= 200 &&
+             data.weeklyAssignments is map &&
+             data.customDates is list && data.customDates.size() <= 366 &&
+             data.customDateAssignments is map;
+    }
+
+    function isValidSwap(data, swapId) {
+      return data.keys().hasAll([
+               'id', 'date', 'scheduleId', 'originalMemberId',
+               'replacementMemberId', 'reason', 'createdAt'
+             ]) &&
+             data.keys().hasOnly([
+               'id', 'date', 'scheduleId', 'originalMemberId',
+               'replacementMemberId', 'reason', 'createdAt'
+             ]) &&
+             data.id is string && data.id == swapId && data.id.size() > 0 && data.id.size() <= 100 &&
+             data.date is string && data.date.size() == 10 &&
+             data.scheduleId is string && data.scheduleId.size() > 0 && data.scheduleId.size() <= 100 &&
+             data.originalMemberId is string && data.originalMemberId.size() > 0 && data.originalMemberId.size() <= 100 &&
+             data.replacementMemberId is string && data.replacementMemberId.size() > 0 && data.replacementMemberId.size() <= 100 &&
+             data.reason is string && data.reason.size() <= 300 &&
+             data.createdAt is string && data.createdAt.size() <= 60;
+    }
+
+    function isValidAttendance(data, attendanceId) {
+      return data.keys().hasAll([
+               'id', 'date', 'scheduleId', 'memberId',
+               'status', 'checkInTime', 'note', 'recordedBy'
+             ]) &&
+             data.keys().hasOnly([
+               'id', 'date', 'scheduleId', 'memberId',
+               'status', 'checkInTime', 'note', 'recordedBy'
+             ]) &&
+             data.id is string && data.id == attendanceId && data.id.size() > 0 && data.id.size() <= 120 &&
+             data.date is string && data.date.size() == 10 &&
+             data.scheduleId is string && data.scheduleId.size() > 0 && data.scheduleId.size() <= 100 &&
+             data.memberId is string && data.memberId.size() > 0 && data.memberId.size() <= 100 &&
+             data.status in ['hadir', 'terlambat', 'izin', 'sakit', 'tidak_piket', 'belum_absen'] &&
+             data.checkInTime is string && data.checkInTime.size() > 0 && data.checkInTime.size() <= 20 &&
+             data.note is string && data.note.size() <= 500 &&
+             data.recordedBy is string && data.recordedBy.size() > 0 && data.recordedBy.size() <= 120;
+    }
+
+    function isValidAccount(data, accountId) {
+      return data.keys().hasAll([
+               'id', 'username', 'password', 'displayName',
+               'role', 'isProtected', 'createdAt'
+             ]) &&
+             data.keys().hasOnly([
+               'id', 'username', 'password', 'displayName',
+               'role', 'isProtected', 'createdAt'
+             ]) &&
+             data.id is string && data.id == accountId && data.id.size() > 0 && data.id.size() <= 100 &&
+             data.username is string && data.username.size() >= 3 && data.username.size() <= 60 &&
+             data.password is string && data.password.size() >= 4 && data.password.size() <= 120 &&
+             data.displayName is string && data.displayName.size() > 0 && data.displayName.size() <= 120 &&
+             data.role in ['developer', 'admin'] &&
+             data.isProtected is bool &&
+             data.createdAt is string && data.createdAt.size() <= 60;
+    }
+
+    // 2. Collection Rules
+    match /admins/{adminId} {
+      allow get, list: if isAdmin();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /accounts/{accountId} {
+      allow get, list: if isRequestValidTime();
+      allow create: if isRequestValidTime() && isValidAccount(request.resource.data, accountId);
+      allow update: if isRequestValidTime() && isValidAccount(request.resource.data, accountId) &&
+                    request.resource.data.id == resource.data.id &&
+                    (accountId != 'acc-developer' || (request.resource.data.role == 'developer' && request.resource.data.isProtected == true));
+      allow delete: if isRequestValidTime() &&
+                    accountId != 'acc-developer' &&
+                    resource.data.role != 'developer' &&
+                    resource.data.isProtected != true;
+    }
+
+    match /members/{memberId} {
+      allow get, list: if isRequestValidTime();
+      allow create: if isRequestValidTime() && isValidMember(request.resource.data, memberId);
+      allow update: if isRequestValidTime() && isValidMember(request.resource.data, memberId) &&
+                    request.resource.data.id == resource.data.id;
+      allow delete: if isRequestValidTime() && resource.data.id == memberId;
+    }
+
+    match /schedules/{scheduleId} {
+      allow get, list: if isRequestValidTime();
+      allow create: if isRequestValidTime() && isValidSchedule(request.resource.data, scheduleId);
+      allow update: if isRequestValidTime() && isValidSchedule(request.resource.data, scheduleId) &&
+                    request.resource.data.id == resource.data.id;
+      allow delete: if isRequestValidTime() && resource.data.id == scheduleId;
+    }
+
+    match /swaps/{swapId} {
+      allow get, list: if isRequestValidTime();
+      allow create: if isRequestValidTime() && isValidSwap(request.resource.data, swapId);
+      allow update: if isRequestValidTime() && isValidSwap(request.resource.data, swapId) &&
+                    request.resource.data.id == resource.data.id;
+      allow delete: if isRequestValidTime() && resource.data.id == swapId;
+    }
+
+    match /attendance/{attendanceId} {
+      allow get, list: if isRequestValidTime();
+      allow create: if isRequestValidTime() && isValidAttendance(request.resource.data, attendanceId);
+      allow update: if isRequestValidTime() && isValidAttendance(request.resource.data, attendanceId) &&
+                    request.resource.data.id == resource.data.id;
+      allow delete: if isRequestValidTime() && resource.data.id == attendanceId;
+    }
+  }
+}
