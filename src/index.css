@@ -10,7 +10,13 @@
   body {
     font-family: var(--font-sans);
     background-color: #FFF9F2;
-    color: #292524;
+    background-image:
+      radial-gradient(at 12% 8%, rgba(251, 146, 60, 0.09) 0px, transparent 48%),
+      radial-gradient(at 88% 12%, rgba(56, 189, 248, 0.08) 0px, transparent 48%),
+      radial-gradient(at 50% 95%, rgba(16, 185, 129, 0.06) 0px, transparent 52%);
+    background-attachment: fixed;
+    color: #1C1917;
+    -webkit-font-smoothing: antialiased;
   }
 
   h1, h2, h3, .font-display {
@@ -22,19 +28,21 @@
   }
 }
 
-/* Tactile 3D Claymorphic / Toy Theme Surfaces */
+/* Tactile 3D Claymorphic / Modern Dashboard Surfaces */
 .card-3d {
   background-color: #FFFFFF;
-  border: 2px solid #F3E3D0;
+  border: 2px solid #F0DFC8;
   border-radius: 1.5rem;
-  box-shadow: 0 6px 0 0 #E8D2B8, 0 10px 24px -6px rgba(180, 130, 80, 0.12);
+  box-shadow:
+    0 6px 0 0 #E5CEB1,
+    0 14px 32px -8px rgba(140, 95, 50, 0.11);
 }
 
 .card-3d-soft {
   background-color: #FFFDF9;
-  border: 2px solid #F3E3D0;
+  border: 2px solid #F0DFC8;
   border-radius: 1.25rem;
-  box-shadow: 0 4px 0 0 #EBD7C0;
+  box-shadow: 0 4px 0 0 #E8D3B9;
 }
 
 .card-3d-sky {
@@ -57,7 +65,7 @@
   border: 2px solid #EA580C;
   border-radius: 0.9rem;
   box-shadow: 0 4px 0 0 #C2410C;
-  transition: transform 0.12s ease, box-shadow 0.12s ease;
+  transition: transform 0.12s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.12s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .btn-3d-primary:hover {
@@ -71,21 +79,21 @@
 
 .btn-3d-secondary {
   background: linear-gradient(180deg, #FFFFFF 0%, #FFF7ED 100%);
-  color: #57534E;
-  border: 2px solid #E7D5C0;
+  color: #44403C;
+  border: 2px solid #E5D0B7;
   border-radius: 0.9rem;
-  box-shadow: 0 4px 0 0 #D8C0A6;
-  transition: transform 0.12s ease, box-shadow 0.12s ease;
+  box-shadow: 0 4px 0 0 #D4B99B;
+  transition: transform 0.12s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.12s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .btn-3d-secondary:hover {
   background: linear-gradient(180deg, #FFFDF9 0%, #FFEDD5 100%);
-  color: #292524;
+  color: #1C1917;
 }
 
 .btn-3d-secondary:active {
   transform: translateY(2px);
-  box-shadow: 0 2px 0 0 #D8C0A6;
+  box-shadow: 0 2px 0 0 #D4B99B;
 }
 
 .btn-3d-sky {
@@ -94,7 +102,7 @@
   border: 2px solid #0369A1;
   border-radius: 0.9rem;
   box-shadow: 0 4px 0 0 #075985;
-  transition: transform 0.12s ease, box-shadow 0.12s ease;
+  transition: transform 0.12s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.12s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .btn-3d-sky:hover {
@@ -105,4 +113,5 @@
   transform: translateY(2px);
   box-shadow: 0 2px 0 0 #075985;
 }
+
 

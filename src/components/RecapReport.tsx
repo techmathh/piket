@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import {
   Download,
+  FileText,
   ChevronLeft,
   ChevronRight,
   Search,
@@ -17,6 +18,10 @@ import {
   type PiketSchedule,
   type ScheduleSwap,
 } from '../utils/piketLogic';
+import {
+  generatePeriodRecapPdfBytes,
+  triggerPdfDownload,
+} from '../utils/pdfExporter';
 import { CharacterAvatar3D } from './CharacterAvatar3D';
 
 interface RecapReportProps {
@@ -131,6 +136,18 @@ export const RecapReport: React.FC<RecapReportProps> = ({
     document.body.removeChild(link);
   };
 
+  const handleDownloadPdf = () => {
+    const pdfBytes = generatePeriodRecapPdfBytes(
+      recapType,
+      summary,
+      filteredMemberRows
+    );
+    triggerPdfDownload(
+      pdfBytes,
+      `rekap-piket-osis-${recapType}-${periodRange.startDate}-sd-${periodRange.endDate}.pdf`
+    );
+  };
+
   return (
     <div className="space-y-6">
       {/* Header & Period Switcher */}
@@ -220,8 +237,18 @@ export const RecapReport: React.FC<RecapReportProps> = ({
 
             <button
               type="button"
-              onClick={handleDownloadCsv}
+              data-testid="btn-export-recap-pdf"
+              onClick={handleDownloadPdf}
               className="btn-3d-primary inline-flex items-center gap-2 px-4 py-2 text-xs font-bold whitespace-nowrap"
+            >
+              <FileText className="w-3.5 h-3.5" />
+              <span>Export PDF</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleDownloadCsv}
+              className="btn-3d-secondary inline-flex items-center gap-2 px-4 py-2 text-xs font-bold whitespace-nowrap"
             >
               <Download className="w-3.5 h-3.5" />
               <span>Unduh CSV</span>

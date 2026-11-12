@@ -459,5 +459,200 @@ test('labels all 32 full-name members as OSIS and remaining 26 members as MPK wi
   assert.equal(shalatM2.weeklyAssignments[3].includes('osis-dwi'), true);
 });
 
+test('calculates shift check-in progress and resolves current active shift accurately', async () => {
+  const {
+    calculateShiftCheckInProgress,
+    findCurrentActiveShift,
+    resolveSchedulesForDate,
+  } = await import('./piketLogic');
 
+  const records: AttendanceRecord[] = [
+    {
+      id: 'att-1',
+      date: '2026-11-11',
+      scheduleId: 'sch-weekly',
+      memberId: 'm1',
+      status: 'hadir',
+      checkInTime: '06:32',
+      note: 'Tepat waktu',
+      recordedBy: 'Admin OSIS',
+    },
+  ];
+
+  const resolved = resolveSchedulesForDate(
+    '2026-11-11',
+    [dailySchedule, weeklySchedule, customSchedule],
+    sampleMembers,
+    [],
+    records
+  );
+
+  // At 07:05, sch-weekly (06:30 - 07:15) is the live active shift
+  const activeAt0705 = findCurrentActiveShift(resolved, '07:05:00', 'all');
+  assert.ok(activeAt0705.activeShift);
+  assert.equal(activeAt0705.activeShift.schedule.id, 'sch-weekly');
+  assert.equal(activeAt0705.isLiveInTimeWindow, true);
+
+  const progress = calculateShiftCheckInProgress(
+    activeAt0705.activeShift.dutyMembers
+  );
+  assert.equal(progress.totalMembers, 2); // m1 and m2 on Wednesday
+  assert.equal(progress.checkedInCount, 1);
+  assert.equal(progress.hadirCount, 1);
+  assert.equal(progress.pendingCount, 1);
+  assert.equal(progress.checkedInPercentage, 50);
+});
+
+test('generates valid PDF 1.4 documents for daily shift attendance and period recap', async () => {
+  const {
+    generateDailyAttendancePdfBytes,
+    generatePeriodRecapPdfBytes,
+  } = await import('./pdfExporter');
+
+  const resolved = resolveSchedulesForDate(
+    '2026-11-11',
+    [dailySchedule, weeklySchedule],
+    sampleMembers,
+    [],
+    []
+  );
+
+  const dailyPdf = generateDailyAttendancePdfBytes(
+    '2026-11-11',
+    resolved,
+    '06:45:00'
+  );
+  const dailyText = new TextDecoder().decode(dailyPdf);
+  assert.equal(dailyText.startsWith('%PDF-1.4\n'), true);
+  assert.equal(dailyText.includes('LAPORAN PRESENSI KEHADIRAN PIKET'), true);
+  assert.equal(dailyText.includes('Nabila Putri'), true);
+  assert.equal(dailyText.trimEnd().endsWith('%%EOF'), true);
+
+  const recap = calculatePeriodRecap(
+    '2026-11-09',
+    '2026-11-15',
+    [weeklySchedule],
+    sampleMembers,
+    [],
+    []
+  );
+  const recapPdf = generatePeriodRecapPdfBytes(
+    'mingguan',
+    recap,
+    recap.memberRows
+  );
+  const recapText = new TextDecoder().decode(recapPdf);
+  assert.equal(recapText.startsWith('%PDF-1.4\n'), true);
+  assert.equal(
+    recapText.includes('REKAPITULASI ABSENSI PIKET OSIS & MPK \\(MINGGUAN\\)'),
+    true
+  );
+  assert.equal(recapText.trimEnd().endsWith('%%EOF'), true);
+});
+
+test('resolves live shift timeline status and generates personal 4-week schedule PDF accurately', async () => {
+  const {
+    getShiftTimelineStatus,
+    getMemberPersonalSchedules,
+    resolveSchedulesForDate,
+  } = await import('./piketLogic');
+  const { generateMemberPersonalSchedulePdfBytes } = await import(
+    './pdfExporter'
+  );
+
+  const resolved = resolveSchedulesForDate(
+    '2026-11-11',
+    [dailySchedule, weeklySchedule],
+    sampleMembers,
+    [],
+    []
+  );
+
+  // At 06:45, dailySchedule (06:15 - 07:00) is LIVE
+  const liveStatus = getShiftTimelineStatus(resolved, '06:45:00', true);
+  assert.equal(liveStatus.state, 'live');
+  assert.equal(
+    liveStatus.headline.includes('Piket Gerbang & Ketertiban Pagi'),
+    true
+  );
+
+  // At 16:00, after all shifts end (15:45), status is completed
+  const completedStatus = getShiftTimelineStatus(resolved, '16:00:00', true);
+  assert.equal(completedStatus.state, 'completed');
+
+  const personal = getMemberPersonalSchedules('m3', [
+    dailySchedule,
+    weeklySchedule,
+  ]);
+  assert.equal(personal.length, 2);
+
+  const personalPdf = generateMemberPersonalSchedulePdfBytes(
+    sampleMembers[0],
+    [dailySchedule, weeklySchedule]
+  );
+  const personalText = new TextDecoder().decode(personalPdf);
+  assert.equal(personalText.startsWith('%PDF-1.4\n'), true);
+  assert.equal(
+    personalText.includes('KARTU JADWAL PIKET PERSONAL PENGURUS OSIS & MPK'),
+    true
+  );
+  assert.equal(personalText.includes('Nabila Putri'), true);
+  assert.equal(personalText.trimEnd().endsWith('%%EOF'), true);
+});
+
+test('formats custom active days and manages day/shift attendance notes (Libur / Keterangan)', async () => {
+  const {
+    formatActiveDaysLabel,
+    createDayAttendanceNoteRecord,
+    getDayAttendanceNote,
+    DAY_NOTE_SCHEDULE_ID,
+    resolveSchedulesForDate,
+  } = await import('./piketLogic');
+  const { generateDailyAttendancePdfBytes } = await import('./pdfExporter');
+
+  assert.equal(formatActiveDaysLabel([1, 2, 3, 4, 5]), 'Senin – Jumat');
+  assert.equal(formatActiveDaysLabel([1, 2, 3, 4, 5, 6]), 'Senin – Sabtu');
+  assert.equal(
+    formatActiveDaysLabel([0, 1, 2, 3, 4, 5, 6]),
+    'Setiap Hari (Senin–Minggu)'
+  );
+  assert.equal(formatActiveDaysLabel([1, 3, 5]), 'Senin, Rabu, Jumat');
+
+  const holidayRecord = createDayAttendanceNoteRecord(
+    '2026-11-12',
+    'Libur Nasional / Tanggal Merah',
+    true,
+    'Developer Sistem OSIS',
+    DAY_NOTE_SCHEDULE_ID
+  );
+  assert.equal(holidayRecord.checkInTime, 'LIBUR');
+  assert.equal(holidayRecord.status, 'izin');
+
+  const retrieved = getDayAttendanceNote('2026-11-12', [holidayRecord]);
+  assert.ok(retrieved);
+  assert.equal(retrieved.note, 'Libur Nasional / Tanggal Merah');
+  assert.equal(retrieved.isHoliday, true);
+
+  // Ensure day note record does not pollute normal duty member resolution
+  const resolved = resolveSchedulesForDate(
+    '2026-11-12',
+    [dailySchedule],
+    sampleMembers,
+    [],
+    [holidayRecord]
+  );
+  assert.equal(resolved.length, 1);
+
+  const pdfWithHoliday = generateDailyAttendancePdfBytes(
+    '2026-11-12',
+    resolved,
+    '07:00:00',
+    retrieved
+  );
+  const pdfStr = new TextDecoder().decode(pdfWithHoliday);
+  assert.equal(
+    pdfStr.includes('STATUS HARI LIBUR: Libur Nasional / Tanggal Merah'),
+    true
+  );
+});
 

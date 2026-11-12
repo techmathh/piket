@@ -7,12 +7,21 @@ import {
   Trash2,
   Edit3,
   UserPlus,
+  Search,
   X,
+  Calendar,
+  Users,
+  CalendarDays,
 } from 'lucide-react';
 import {
   DAY_NAMES_ID,
+  MONDAY_FIRST_DAYS,
+  formatActiveDaysLabel,
   formatFullDateId,
   formatWeekCycleLabel,
+  getMemberOrgLabel,
+  getWeekOfMonth,
+  normalizeMemberId,
   type OsisMember,
   type PiketSchedule,
   type ScheduleMode,
@@ -38,9 +47,21 @@ interface ScheduleManagerProps {
 
 const MODE_LABELS: Record<ScheduleMode, string> = {
   harian: 'Sistem Harian',
-  mingguan: 'Sistem Mingguan',
-  custom: 'Jadwal Custom',
+  mingguan: 'Sistem Mingguan (Per Hari)',
+  custom: 'Custom Tanggal Khusus',
 };
+
+function matchesPosCategory(
+  sch: PiketSchedule,
+  cat: 'all' | 'gerbang' | 'warsis' | 'shalat'
+): boolean {
+  if (cat === 'all') return true;
+  const lower = sch.title.toLowerCase();
+  if (cat === 'gerbang') return lower.includes('gerbang');
+  if (cat === 'warsis') return lower.includes('warsis');
+  if (cat === 'shalat') return lower.includes('shalat');
+  return true;
+}
 
 export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
   todayStr,
@@ -53,32 +74,45 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
   onDeleteSwap,
   onOpenSwapModal,
 }) => {
-  const [modeFilter, setModeFilter] = useState<'all' | ScheduleMode>('all');
-  const [weekFilter, setWeekFilter] = useState<'all' | 'every_week' | number>(
-    'all'
+  // Default to the current active week (1..4) so the admin sees the 3 relevant schedules immediately
+  const [selectedWeek, setSelectedWeek] = useState<number | 'all'>(() =>
+    getWeekOfMonth(todayStr)
   );
+  const [posCategory, setPosCategory] = useState<
+    'all' | 'gerbang' | 'warsis' | 'shalat'
+  >('all');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+
+  // Inline custom day editor state per schedule card
+  const [customDaysOpenForScheduleId, setCustomDaysOpenForScheduleId] =
+    useState<string | null>(null);
+
+  // Quick inline member add state (targets a specific schedule + day or custom date)
+  const [quickAssignTarget, setQuickAssignTarget] = useState<{
+    scheduleId: string;
+    dayOrMode: number | 'daily' | string;
+  } | null>(null);
+  const [quickAssignMemberId, setQuickAssignMemberId] = useState<string>(
+    members[0]?.id || ''
+  );
+  const [quickAssignFilter, setQuickAssignFilter] = useState<string>('');
+
+  // Modal state for Create / Edit Schedule
   const [showFormModal, setShowFormModal] = useState<boolean>(false);
   const [editingScheduleId, setEditingScheduleId] = useState<string | null>(
     null
   );
-
-  // Form state for Add / Edit Schedule
   const [title, setTitle] = useState<string>('');
   const [description, setDescription] = useState<string>('');
   const [location, setLocation] = useState<string>('');
   const [startTime, setStartTime] = useState<string>('06:30');
   const [endTime, setEndTime] = useState<string>('07:15');
   const [mode, setMode] = useState<ScheduleMode>('mingguan');
-  const [weekSelectionMode, setWeekSelectionMode] = useState<
-    'setiap_minggu' | 'pilih_minggu'
-  >('setiap_minggu');
-  const [activeWeeks, setActiveWeeks] = useState<number[]>([1, 2, 3, 4]);
+  const [activeWeeks, setActiveWeeks] = useState<number[]>([1]);
   const [tasksText, setTasksText] = useState<string>(
-    'Menjaga kebersihan pos piket\nMencatat kehadiran dan buku agenda'
+    'Menjaga kebersihan pos piket\nMencatat kehadiran petugas'
   );
-  const [activeDays, setActiveDays] = useState<number[]>([
-    0, 1, 2, 3, 4, 5, 6,
-  ]);
+  const [activeDays, setActiveDays] = useState<number[]>([1, 2, 3, 4, 5]);
   const [dailyMembers, setDailyMembers] = useState<string[]>([]);
   const [weeklyAssignments, setWeeklyAssignments] = useState<
     Record<number, string[]>
@@ -93,52 +127,77 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
   });
   const [selectedDayTab, setSelectedDayTab] = useState<number>(1);
   const [customDates, setCustomDates] = useState<string[]>([todayStr]);
+  const [selectedCustomDateTab, setSelectedCustomDateTab] =
+    useState<string>(todayStr);
   const [newCustomDateInput, setNewCustomDateInput] =
     useState<string>(todayStr);
   const [customDateAssignments, setCustomDateAssignments] = useState<
     Record<string, string[]>
   >({});
+  const [modalMemberSearch, setModalMemberSearch] = useState<string>('');
   const [formError, setFormError] = useState<string>('');
-
-  // Quick inline member reassignment state
-  const [quickAssignScheduleId, setQuickAssignScheduleId] = useState<
-    string | null
-  >(null);
-  const [quickAssignDay, setQuickAssignDay] = useState<number>(1);
-  const [quickAssignMemberId, setQuickAssignMemberId] = useState<string>(
-    members[0]?.id || ''
-  );
 
   const memberMap = new Map<string, OsisMember>();
   for (const m of members) memberMap.set(m.id, m);
 
-  const filteredSchedules = schedules.filter((s) => {
-    if (modeFilter !== 'all' && s.mode !== modeFilter) return false;
+  // Filter schedules by selectedWeek, posCategory, and optional searchQuery
+  const filteredSchedules = schedules.filter((sch) => {
     const sWeeks =
-      s.activeWeeks && s.activeWeeks.length > 0 ? s.activeWeeks : [1, 2, 3, 4];
-    if (weekFilter === 'every_week') {
-      return sWeeks.length >= 4;
+      sch.activeWeeks && sch.activeWeeks.length > 0
+        ? sch.activeWeeks
+        : [1, 2, 3, 4];
+    if (
+      sch.mode !== 'custom' &&
+      selectedWeek !== 'all' &&
+      !sWeeks.includes(selectedWeek)
+    ) {
+      return false;
     }
-    if (typeof weekFilter === 'number') {
-      return sWeeks.includes(weekFilter);
+    if (!matchesPosCategory(sch, posCategory)) {
+      return false;
+    }
+    if (searchQuery.trim()) {
+      const q = searchQuery.trim().toLowerCase();
+      if (
+        sch.title.toLowerCase().includes(q) ||
+        sch.location.toLowerCase().includes(q)
+      ) {
+        return true;
+      }
+      const allAssignedIds =
+        sch.mode === 'harian'
+          ? sch.dailyMembers
+          : sch.mode === 'custom'
+          ? [
+              ...sch.dailyMembers,
+              ...Object.values(sch.customDateAssignments || {}).flat(),
+            ]
+          : Object.values(sch.weeklyAssignments).flat();
+      return allAssignedIds.some((rawId) => {
+        const m = memberMap.get(normalizeMemberId(rawId));
+        return (
+          m &&
+          (m.name.toLowerCase().includes(q) ||
+            m.kelas.toLowerCase().includes(q) ||
+            getMemberOrgLabel(m).toLowerCase().includes(q))
+        );
+      });
     }
     return true;
   });
 
-  const openCreateForm = () => {
+  const openCreateForm = (initialMode: ScheduleMode = 'mingguan') => {
+    const defaultWeek = typeof selectedWeek === 'number' ? selectedWeek : 1;
     setEditingScheduleId(null);
     setTitle('');
     setDescription('');
     setLocation('Ruang Sekretariat OSIS');
     setStartTime('06:30');
     setEndTime('07:15');
-    setMode('mingguan');
-    setWeekSelectionMode('setiap_minggu');
-    setActiveWeeks([1, 2, 3, 4]);
-    setTasksText(
-      'Menjaga kebersihan pos piket\nMencatat kehadiran dan buku agenda'
-    );
-    setActiveDays([0, 1, 2, 3, 4, 5, 6]);
+    setMode(initialMode);
+    setActiveWeeks([defaultWeek]);
+    setTasksText('Menjaga kebersihan pos piket\nMencatat kehadiran petugas');
+    setActiveDays([1, 2, 3, 4, 5]);
     const defaultMemberIds = members.slice(0, 2).map((m) => m.id);
     setDailyMembers(defaultMemberIds);
     setWeeklyAssignments({
@@ -147,13 +206,15 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
       3: defaultMemberIds,
       4: defaultMemberIds,
       5: defaultMemberIds,
-      6: defaultMemberIds,
-      0: defaultMemberIds,
+      6: [],
+      0: [],
     });
+    setSelectedDayTab(1);
     setCustomDates([todayStr]);
-    setCustomDateAssignments({
-      [todayStr]: defaultMemberIds,
-    });
+    setSelectedCustomDateTab(todayStr);
+    setNewCustomDateInput(todayStr);
+    setCustomDateAssignments({ [todayStr]: defaultMemberIds });
+    setModalMemberSearch('');
     setFormError('');
     setShowFormModal(true);
   };
@@ -170,20 +231,170 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
     setStartTime(sch.startTime);
     setEndTime(sch.endTime);
     setMode(sch.mode);
-    setWeekSelectionMode(
-      schWeeks.length >= 4 ? 'setiap_minggu' : 'pilih_minggu'
-    );
     setActiveWeeks(schWeeks);
     setTasksText(sch.tasks.join('\n'));
-    setActiveDays([...sch.activeDays]);
-    setDailyMembers([...sch.dailyMembers]);
-    setWeeklyAssignments({ ...sch.weeklyAssignments });
-    setCustomDates(
-      sch.customDates.length > 0 ? [...sch.customDates] : [todayStr]
-    );
-    setCustomDateAssignments({ ...sch.customDateAssignments });
+    const initialActiveDays =
+      sch.activeDays.length > 0 ? [...sch.activeDays] : [1, 2, 3, 4, 5];
+    setActiveDays(initialActiveDays);
+    setDailyMembers(sch.dailyMembers.map(normalizeMemberId));
+    const normWeekly: Record<number, string[]> = {};
+    for (const [k, list] of Object.entries(sch.weeklyAssignments)) {
+      normWeekly[Number(k)] = (list || []).map(normalizeMemberId);
+    }
+    setWeeklyAssignments(normWeekly);
+    const firstActiveDay =
+      MONDAY_FIRST_DAYS.find((d) => initialActiveDays.includes(d)) ?? 1;
+    setSelectedDayTab(firstActiveDay);
+    const nextCustomDates =
+      sch.customDates.length > 0 ? [...sch.customDates] : [todayStr];
+    setCustomDates(nextCustomDates);
+    setSelectedCustomDateTab(nextCustomDates[0] || todayStr);
+    const normCustomMap: Record<string, string[]> = {};
+    for (const [dtKey, list] of Object.entries(
+      sch.customDateAssignments || {}
+    )) {
+      normCustomMap[dtKey] = (list || []).map(normalizeMemberId);
+    }
+    setCustomDateAssignments(normCustomMap);
+    setModalMemberSearch('');
     setFormError('');
     setShowFormModal(true);
+  };
+
+  // Toggle an active day directly on a schedule card (Inline Custom Hari)
+  const handleInlineToggleScheduleDay = (
+    schedule: PiketSchedule,
+    dayNum: number
+  ) => {
+    const currentDays =
+      schedule.activeDays && schedule.activeDays.length > 0
+        ? schedule.activeDays
+        : [1, 2, 3, 4, 5];
+    const isCurrentlyActive = currentDays.includes(dayNum);
+    let nextDays: number[];
+    if (isCurrentlyActive) {
+      nextDays = currentDays.filter((d) => d !== dayNum);
+      if (nextDays.length === 0) {
+        // Keep at least 1 active day
+        return;
+      }
+    } else {
+      nextDays = [...currentDays, dayNum];
+    }
+    onUpdateSchedule({
+      ...schedule,
+      activeDays: nextDays,
+    });
+  };
+
+  const handleInlinePresetDays = (
+    schedule: PiketSchedule,
+    presetDays: number[]
+  ) => {
+    onUpdateSchedule({
+      ...schedule,
+      activeDays: presetDays,
+    });
+  };
+
+  const handleQuickAddMember = (schedule: PiketSchedule) => {
+    if (!quickAssignTarget) return;
+    const targetMemberId = quickAssignMemberId || members[0]?.id;
+    if (!targetMemberId) return;
+
+    if (quickAssignTarget.dayOrMode === 'daily') {
+      const nextDaily = Array.from(
+        new Set([
+          ...schedule.dailyMembers.map(normalizeMemberId),
+          targetMemberId,
+        ])
+      );
+      onUpdateSchedule({
+        ...schedule,
+        dailyMembers: nextDaily,
+      });
+    } else if (typeof quickAssignTarget.dayOrMode === 'number') {
+      const dayNum = quickAssignTarget.dayOrMode;
+      const existing = (schedule.weeklyAssignments[dayNum] || []).map(
+        normalizeMemberId
+      );
+      const nextDayMembers = Array.from(new Set([...existing, targetMemberId]));
+      const nextActiveDays = Array.from(
+        new Set([...schedule.activeDays, dayNum])
+      );
+      onUpdateSchedule({
+        ...schedule,
+        activeDays: nextActiveDays,
+        weeklyAssignments: {
+          ...schedule.weeklyAssignments,
+          [dayNum]: nextDayMembers,
+        },
+      });
+    } else {
+      // Custom date string YYYY-MM-DD
+      const dateKey = String(quickAssignTarget.dayOrMode);
+      const existing = (
+        schedule.customDateAssignments[dateKey] ||
+        schedule.dailyMembers ||
+        []
+      ).map(normalizeMemberId);
+      const nextDateMembers = Array.from(
+        new Set([...existing, targetMemberId])
+      );
+      const nextCustomDates = Array.from(
+        new Set([...schedule.customDates, dateKey])
+      ).sort();
+      onUpdateSchedule({
+        ...schedule,
+        customDates: nextCustomDates,
+        customDateAssignments: {
+          ...schedule.customDateAssignments,
+          [dateKey]: nextDateMembers,
+        },
+      });
+    }
+    setQuickAssignTarget(null);
+    setQuickAssignFilter('');
+  };
+
+  const handleRemoveMemberFromScheduleDay = (
+    schedule: PiketSchedule,
+    dayOrMode: number | 'daily' | string,
+    memberIdToRemove: string
+  ) => {
+    const normRemove = normalizeMemberId(memberIdToRemove);
+    if (dayOrMode === 'daily') {
+      onUpdateSchedule({
+        ...schedule,
+        dailyMembers: schedule.dailyMembers.filter(
+          (id) => normalizeMemberId(id) !== normRemove
+        ),
+      });
+    } else if (typeof dayOrMode === 'number') {
+      const current = schedule.weeklyAssignments[dayOrMode] || [];
+      onUpdateSchedule({
+        ...schedule,
+        weeklyAssignments: {
+          ...schedule.weeklyAssignments,
+          [dayOrMode]: current.filter(
+            (id) => normalizeMemberId(id) !== normRemove
+          ),
+        },
+      });
+    } else {
+      const dateKey = String(dayOrMode);
+      const current =
+        schedule.customDateAssignments[dateKey] || schedule.dailyMembers || [];
+      onUpdateSchedule({
+        ...schedule,
+        customDateAssignments: {
+          ...schedule.customDateAssignments,
+          [dateKey]: current.filter(
+            (id) => normalizeMemberId(id) !== normRemove
+          ),
+        },
+      });
+    }
   };
 
   const toggleWeekNumber = (weekNum: number) => {
@@ -196,12 +407,14 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
     });
   };
 
-  const toggleDayActive = (dayNum: number) => {
-    setActiveDays((prev) =>
-      prev.includes(dayNum)
-        ? prev.filter((d) => d !== dayNum)
-        : [...prev, dayNum].sort()
-    );
+  const toggleModalActiveDay = (dayNum: number) => {
+    setActiveDays((prev) => {
+      if (prev.includes(dayNum)) {
+        const next = prev.filter((d) => d !== dayNum);
+        return next.length > 0 ? next : [dayNum];
+      }
+      return [...prev, dayNum];
+    });
   };
 
   const toggleDailyMember = (memberId: string) => {
@@ -220,22 +433,44 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
         : [...current, memberId];
       return { ...prev, [dayNum]: next };
     });
+    if (!activeDays.includes(dayNum)) {
+      setActiveDays((prev) => Array.from(new Set([...prev, dayNum])));
+    }
+  };
+
+  const toggleCustomDateMember = (dateStr: string, memberId: string) => {
+    setCustomDateAssignments((prev) => {
+      const current = prev[dateStr] || dailyMembers || [];
+      const next = current.includes(memberId)
+        ? current.filter((id) => id !== memberId)
+        : [...current, memberId];
+      return { ...prev, [dateStr]: next };
+    });
   };
 
   const handleAddCustomDate = () => {
     if (!newCustomDateInput) return;
     if (!customDates.includes(newCustomDateInput)) {
-      setCustomDates((prev) => [...prev, newCustomDateInput].sort());
+      const nextDates = [...customDates, newCustomDateInput].sort();
+      setCustomDates(nextDates);
       setCustomDateAssignments((prev) => ({
         ...prev,
         [newCustomDateInput]:
-          prev[newCustomDateInput] || members.slice(0, 2).map((m) => m.id),
+          prev[newCustomDateInput] ||
+          dailyMembers ||
+          members.slice(0, 2).map((m) => m.id),
       }));
     }
+    setSelectedCustomDateTab(newCustomDateInput);
   };
 
   const handleRemoveCustomDate = (dt: string) => {
-    setCustomDates((prev) => prev.filter((d) => d !== dt));
+    const next = customDates.filter((d) => d !== dt);
+    const safeNext = next.length > 0 ? next : [todayStr];
+    setCustomDates(safeNext);
+    if (selectedCustomDateTab === dt) {
+      setSelectedCustomDateTab(safeNext[0]);
+    }
   };
 
   const handleSaveScheduleForm = (e: React.FormEvent) => {
@@ -254,13 +489,6 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
       .map((t) => t.trim())
       .filter(Boolean);
 
-    const resolvedWeeks =
-      weekSelectionMode === 'setiap_minggu'
-        ? [1, 2, 3, 4]
-        : activeWeeks.length > 0
-        ? activeWeeks
-        : [1, 2, 3, 4];
-
     const schedulePayload: PiketSchedule = {
       id: editingScheduleId || `sch-${Date.now()}`,
       title: title.trim(),
@@ -271,7 +499,7 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
       startTime,
       endTime,
       mode,
-      activeWeeks: resolvedWeeks,
+      activeWeeks: activeWeeks.length > 0 ? activeWeeks : [1, 2, 3, 4],
       tasks:
         parsedTasks.length > 0
           ? parsedTasks
@@ -281,12 +509,11 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
           ? []
           : activeDays.length > 0
           ? activeDays
-          : [0, 1, 2, 3, 4, 5, 6],
+          : [1, 2, 3, 4, 5],
       dailyMembers,
       weeklyAssignments,
       customDates: mode === 'custom' ? customDates : [],
-      customDateAssignments:
-        mode === 'custom' ? customDateAssignments : {},
+      customDateAssignments: mode === 'custom' ? customDateAssignments : {},
     };
 
     if (editingScheduleId) {
@@ -297,535 +524,801 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
     setShowFormModal(false);
   };
 
-  const handleQuickAddMemberToSchedule = (schedule: PiketSchedule) => {
-    const targetMemberId = quickAssignMemberId || members[0]?.id;
-    if (!targetMemberId) return;
-    if (schedule.mode === 'harian' || schedule.mode === 'custom') {
-      const nextDaily = Array.from(
-        new Set([...schedule.dailyMembers, targetMemberId])
-      );
-      onUpdateSchedule({
-        ...schedule,
-        dailyMembers: nextDaily,
-      });
-    } else {
-      const existing = schedule.weeklyAssignments[quickAssignDay] || [];
-      const nextDayMembers = Array.from(
-        new Set([...existing, targetMemberId])
-      );
-      const nextActiveDays = Array.from(
-        new Set([...schedule.activeDays, quickAssignDay])
-      ).sort();
-      onUpdateSchedule({
-        ...schedule,
-        activeDays: nextActiveDays,
-        weeklyAssignments: {
-          ...schedule.weeklyAssignments,
-          [quickAssignDay]: nextDayMembers,
-        },
-      });
+  const getCardHeaderAccent = (schTitle: string) => {
+    const lower = schTitle.toLowerCase();
+    if (lower.includes('gerbang')) {
+      return {
+        bg: 'bg-emerald-50/90 border-emerald-200',
+        badge: 'bg-emerald-600 text-white',
+      };
     }
-    setQuickAssignScheduleId(null);
+    if (lower.includes('warsis')) {
+      return {
+        bg: 'bg-orange-50/90 border-orange-200',
+        badge: 'bg-orange-500 text-white',
+      };
+    }
+    return {
+      bg: 'bg-sky-50/90 border-sky-200',
+      badge: 'bg-sky-600 text-white',
+    };
   };
 
-  const handleRemoveMemberFromScheduleDay = (
-    schedule: PiketSchedule,
-    dayOrMode: number | 'daily',
-    memberId: string
-  ) => {
-    if (dayOrMode === 'daily') {
-      onUpdateSchedule({
-        ...schedule,
-        dailyMembers: schedule.dailyMembers.filter((id) => id !== memberId),
-      });
-    } else {
-      const current = schedule.weeklyAssignments[dayOrMode] || [];
-      onUpdateSchedule({
-        ...schedule,
-        weeklyAssignments: {
-          ...schedule.weeklyAssignments,
-          [dayOrMode]: current.filter((id) => id !== memberId),
-        },
-      });
-    }
-  };
+  // Filtered member list for the Add/Edit Modal checklist
+  const modalFilteredMembers = members.filter((m) => {
+    if (!modalMemberSearch.trim()) return true;
+    const q = modalMemberSearch.trim().toLowerCase();
+    return (
+      m.name.toLowerCase().includes(q) ||
+      m.kelas.toLowerCase().includes(q) ||
+      getMemberOrgLabel(m).toLowerCase().includes(q)
+    );
+  });
+
+  // Filtered member list for the inline quick-add dropdown
+  const quickFilteredMembers = members.filter((m) => {
+    if (!quickAssignFilter.trim()) return true;
+    const q = quickAssignFilter.trim().toLowerCase();
+    return (
+      m.name.toLowerCase().includes(q) ||
+      m.kelas.toLowerCase().includes(q) ||
+      getMemberOrgLabel(m).toLowerCase().includes(q)
+    );
+  });
 
   return (
-    <div className="space-y-6">
-      {/* Top Header & Mode Filter */}
-      <section className="card-3d p-5 md:p-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div className="space-y-1">
-          <div className="flex items-center gap-2 text-xs font-bold text-orange-600">
-            <span>Manajemen Multi-Jadwal OSIS (Database Firestore)</span>
-            <span aria-hidden="true">·</span>
-            <span className="font-mono tabular-nums text-stone-700">
-              {schedules.length} jadwal terdaftar
-            </span>
+    <div className="space-y-5">
+      {/* 1. Simplified Top Header + Step-by-Step Week & Pos Filter Bar */}
+      <section className="card-3d p-4 sm:p-6 space-y-4">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b-2 border-[#F3E3D0]">
+          <div className="space-y-1">
+            <div className="flex flex-wrap items-center gap-2 text-xs font-bold text-orange-600">
+              <span>Pengaturan Jadwal Piket OSIS & MPK</span>
+              <span aria-hidden="true">·</span>
+              <span className="text-sky-700">
+                Menampilkan {filteredSchedules.length} dari {schedules.length}{' '}
+                jadwal
+              </span>
+            </div>
+            <h1 className="text-xl sm:text-2xl font-bold text-stone-900">
+              Kelola Jadwal & Custom Hari Piket
+            </h1>
+            <p className="text-xs sm:text-sm text-stone-600">
+              Pilih <strong>Minggu (1–4)</strong>, atur{' '}
+              <strong>Custom Hari Aktif (Senin–Minggu)</strong>, atau buat{' '}
+              <strong>Jadwal Tanggal Khusus</strong>.
+            </p>
           </div>
-          <h1 className="text-2xl font-bold text-stone-900">
-            Kelola Jadwal & Pergantian Piket (Minggu 1 – Minggu 4)
-          </h1>
-          <p className="text-sm text-stone-600">
-            Atur lebih dari satu jadwal piket dengan sistem waktu Harian,
-            Mingguan, atau Custom tanggal, serta pilih siklus Setiap Minggu atau
-            Minggu 1 – Minggu 4.
-          </p>
-        </div>
 
-        <div className="flex flex-wrap items-center gap-3 shrink-0">
-          {schedules.length > 0 && members.length > 1 && (
+          <div className="grid grid-cols-2 sm:flex flex-wrap items-center gap-2 shrink-0">
+            {schedules.length > 0 && members.length > 1 && (
+              <button
+                type="button"
+                onClick={() =>
+                  onOpenSwapModal(
+                    todayStr,
+                    filteredSchedules[0]?.id || schedules[0]?.id || ''
+                  )
+                }
+                className="btn-3d-secondary inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-bold whitespace-nowrap"
+              >
+                <ArrowLeftRight className="w-3.5 h-3.5 text-orange-500 shrink-0" />
+                <span>Tukar Piket</span>
+              </button>
+            )}
+
             <button
               type="button"
-              onClick={() =>
-                onOpenSwapModal(todayStr, schedules[0]?.id || '')
-              }
-              className="btn-3d-secondary inline-flex items-center gap-2 px-4 py-2 text-xs font-bold whitespace-nowrap"
+              data-testid="btn-create-custom-date-schedule"
+              onClick={() => openCreateForm('custom')}
+              className="btn-3d-sky inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-bold whitespace-nowrap"
             >
-              <ArrowLeftRight className="w-4 h-4" />
-              <span>Tukar / Ganti Piket Harian</span>
+              <CalendarDays className="w-3.5 h-3.5 shrink-0" />
+              <span>+ Jadwal Tanggal Khusus</span>
             </button>
-          )}
 
-          <button
-            type="button"
-            onClick={openCreateForm}
-            className="btn-3d-primary inline-flex items-center gap-2 px-4 py-2.5 text-xs font-bold whitespace-nowrap"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Tambah Jadwal Baru</span>
-          </button>
+            <button
+              type="button"
+              data-testid="btn-create-schedule"
+              onClick={() => openCreateForm('mingguan')}
+              className="col-span-2 sm:col-span-1 btn-3d-primary inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-bold whitespace-nowrap"
+            >
+              <Plus className="w-4 h-4 shrink-0" />
+              <span>Tambah Jadwal Baru</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Clean 3-Part Filter Toolbar: 1) Siklus Minggu 1-4, 2) Pos Piket, 3) Cari Petugas */}
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2.5">
+            {/* Step 1: Pilih Minggu */}
+            <div className="grid grid-cols-5 sm:flex items-center gap-1 p-1 bg-[#FFF3E0] border-2 border-[#EBD5B8] rounded-xl">
+              {[1, 2, 3, 4].map((wNum) => (
+                <button
+                  key={wNum}
+                  type="button"
+                  data-testid={`filter-week-${wNum}`}
+                  onClick={() => setSelectedWeek(wNum)}
+                  className={`px-2 sm:px-3 py-1.5 text-[11px] sm:text-xs font-bold rounded-lg transition-all text-center whitespace-nowrap ${
+                    selectedWeek === wNum
+                      ? 'bg-orange-500 text-white shadow-xs'
+                      : 'text-stone-700 hover:bg-white/80'
+                  }`}
+                >
+                  <span className="sm:hidden">Mgg {wNum}</span>
+                  <span className="hidden sm:inline">Minggu {wNum}</span>
+                </button>
+              ))}
+              <button
+                type="button"
+                data-testid="filter-week-all"
+                onClick={() => setSelectedWeek('all')}
+                className={`px-2 sm:px-3 py-1.5 text-[11px] sm:text-xs font-bold rounded-lg transition-all text-center whitespace-nowrap ${
+                  selectedWeek === 'all'
+                    ? 'bg-stone-900 text-white shadow-xs'
+                    : 'text-stone-600 hover:bg-white/80'
+                }`}
+              >
+                Semua ({schedules.length})
+              </button>
+            </div>
+
+            {/* Step 2: Pilih Pos */}
+            <div className="grid grid-cols-4 sm:flex items-center gap-1 p-1 bg-[#FFF8EE] border-2 border-[#F3E3D0] rounded-xl">
+              {(
+                [
+                  { id: 'all', label: 'Semua Pos' },
+                  { id: 'gerbang', label: 'Gerbang' },
+                  { id: 'warsis', label: 'Warsis' },
+                  { id: 'shalat', label: 'Shalat' },
+                ] as const
+              ).map((pos) => (
+                <button
+                  key={pos.id}
+                  type="button"
+                  onClick={() => setPosCategory(pos.id)}
+                  className={`px-2 sm:px-2.5 py-1.5 text-[11px] sm:text-xs font-bold rounded-lg transition-all text-center whitespace-nowrap ${
+                    posCategory === pos.id
+                      ? 'bg-stone-900 text-white shadow-xs'
+                      : 'text-stone-600 hover:bg-white/80'
+                  }`}
+                >
+                  {pos.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Step 3: Search Officer or Pos */}
+          <div className="relative w-full lg:w-64 shrink-0">
+            <Search className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              aria-label="Cari jadwal atau nama petugas"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Cari nama petugas / kelas..."
+              className="w-full pl-9 pr-8 py-2 text-xs font-medium bg-white border-2 border-[#EBD5B8] rounded-xl text-stone-900 placeholder:text-stone-400 focus:outline-none focus:border-orange-400"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => setSearchQuery('')}
+                aria-label="Hapus pencarian"
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-700 p-1"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
         </div>
       </section>
 
-      {/* Filter Tabs: Sistem Waktu & Siklus Minggu 1-4 */}
-      <div className="flex flex-wrap items-center justify-between gap-3 card-3d-soft px-4 py-3">
-        <div className="flex flex-wrap items-center gap-1 p-1 bg-[#FFF3E0] rounded-xl">
-          <button
-            type="button"
-            onClick={() => setModeFilter('all')}
-            className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-colors whitespace-nowrap ${
-              modeFilter === 'all'
-                ? 'bg-white text-stone-900 shadow-xs'
-                : 'text-stone-600 hover:text-stone-900'
-            }`}
-          >
-            Semua Sistem ({schedules.length})
-          </button>
-          <button
-            type="button"
-            onClick={() => setModeFilter('harian')}
-            className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-colors whitespace-nowrap ${
-              modeFilter === 'harian'
-                ? 'bg-white text-stone-900 shadow-xs'
-                : 'text-stone-600 hover:text-stone-900'
-            }`}
-          >
-            Harian ({schedules.filter((s) => s.mode === 'harian').length})
-          </button>
-          <button
-            type="button"
-            onClick={() => setModeFilter('mingguan')}
-            className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-colors whitespace-nowrap ${
-              modeFilter === 'mingguan'
-                ? 'bg-white text-stone-900 shadow-xs'
-                : 'text-stone-600 hover:text-stone-900'
-            }`}
-          >
-            Mingguan ({schedules.filter((s) => s.mode === 'mingguan').length})
-          </button>
-          <button
-            type="button"
-            onClick={() => setModeFilter('custom')}
-            className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-colors whitespace-nowrap ${
-              modeFilter === 'custom'
-                ? 'bg-white text-stone-900 shadow-xs'
-                : 'text-stone-600 hover:text-stone-900'
-            }`}
-          >
-            Custom Tanggal ({schedules.filter((s) => s.mode === 'custom').length})
-          </button>
-        </div>
-
-        {/* Week Cycle Filter (Setiap Minggu / Minggu 1 - Minggu 4) */}
-        <div className="flex flex-wrap items-center gap-1 p-1 bg-[#FFF3E0] rounded-xl">
-          <button
-            type="button"
-            onClick={() => setWeekFilter('all')}
-            className={`px-2.5 py-1.5 text-xs font-bold rounded-lg transition-colors whitespace-nowrap ${
-              weekFilter === 'all'
-                ? 'bg-white text-stone-900 shadow-xs'
-                : 'text-stone-600 hover:text-stone-900'
-            }`}
-          >
-            Semua Minggu
-          </button>
-          <button
-            type="button"
-            onClick={() => setWeekFilter('every_week')}
-            className={`px-2.5 py-1.5 text-xs font-bold rounded-lg transition-colors whitespace-nowrap ${
-              weekFilter === 'every_week'
-                ? 'bg-white text-stone-900 shadow-xs'
-                : 'text-stone-600 hover:text-stone-900'
-            }`}
-          >
-            Setiap Minggu
-          </button>
-          {[1, 2, 3, 4].map((w) => (
-            <button
-              key={w}
-              type="button"
-              onClick={() => setWeekFilter(w)}
-              className={`px-2.5 py-1.5 text-xs font-bold rounded-lg transition-colors whitespace-nowrap ${
-                weekFilter === w
-                  ? 'bg-white text-stone-900 shadow-xs'
-                  : 'text-stone-600 hover:text-stone-900'
-              }`}
-            >
-              Minggu {w}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Schedule Cards Grid */}
+      {/* 2. Clean Schedule Cards for the Selected Week */}
       {filteredSchedules.length === 0 ? (
-        <section className="card-3d p-8 md:p-10 text-center space-y-4">
-          <div className="max-w-md mx-auto rounded-2xl overflow-hidden border-2 border-[#F3E3D0] shadow-[0_4px_0_0_#E8D2B8]">
+        <section className="card-3d p-8 text-center space-y-4">
+          <div className="max-w-xs mx-auto rounded-2xl overflow-hidden border-2 border-[#F3E3D0]">
             <img
               src={banner3dImg}
               alt="Ilustrasi 3D Jadwal OSIS"
-              className="w-full h-40 object-cover"
+              className="w-full h-36 object-cover"
             />
           </div>
-          <div className="space-y-1.5 max-w-md mx-auto">
-            <h2 className="text-lg font-bold text-stone-900">
-              Belum Ada Jadwal Piket Terdaftar
+          <div className="space-y-1 max-w-md mx-auto">
+            <h2 className="text-base sm:text-lg font-bold text-stone-900">
+              Tidak Ada Jadwal yang Cocok dengan Filter
             </h2>
             <p className="text-xs text-stone-600">
-              Tambahkan jadwal piket baru (Harian, Mingguan, atau Custom) dan
-              pilih apakah berlaku Setiap Minggu atau pada Minggu 1 – Minggu 4.
+              Coba pilih minggu lain atau klik tombol di bawah untuk menampilkan
+              semua jadwal.
             </p>
           </div>
           <button
             type="button"
-            onClick={openCreateForm}
-            className="btn-3d-primary inline-flex items-center gap-2 px-4 py-2.5 text-xs font-bold"
+            onClick={() => {
+              setSelectedWeek('all');
+              setPosCategory('all');
+              setSearchQuery('');
+            }}
+            className="btn-3d-secondary px-4 py-2 text-xs font-bold"
           >
-            <Plus className="w-4 h-4" />
-            <span>Buat Jadwal Pertama</span>
+            Reset Filter Jadwal
           </button>
         </section>
       ) : (
-        <div className="space-y-5">
-          {filteredSchedules.map((sch) => (
-            <article key={sch.id} className="card-3d overflow-hidden">
-              <div className="p-5 bg-[#FFFDF8] border-b-2 border-[#F3E3D0] flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-                <div className="space-y-1">
-                  <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-stone-600">
-                    <span className="font-bold text-orange-600">
-                      {MODE_LABELS[sch.mode]}
-                    </span>
-                    <span aria-hidden="true">·</span>
-                    <span className="font-bold text-sky-700">
-                      Siklus: {formatWeekCycleLabel(sch.activeWeeks)}
-                    </span>
-                    <span aria-hidden="true">·</span>
-                    <span className="inline-flex items-center gap-1 font-mono font-bold tabular-nums text-stone-700">
-                      <Clock className="w-3.5 h-3.5 text-orange-500" />
-                      {sch.startTime} – {sch.endTime} WIB
-                    </span>
-                    <span aria-hidden="true">·</span>
-                    <span className="inline-flex items-center gap-1 text-stone-600">
-                      <MapPin className="w-3.5 h-3.5 text-orange-500" />
-                      {sch.location}
-                    </span>
-                  </div>
-                  <h2 className="text-lg font-bold text-stone-900">
-                    {sch.title}
-                  </h2>
-                  <p className="text-sm text-stone-600">{sch.description}</p>
-                </div>
+        <div className="space-y-4">
+          {filteredSchedules.map((sch) => {
+            const accent = getCardHeaderAccent(sch.title);
+            const effectiveActiveDays =
+              sch.activeDays && sch.activeDays.length > 0
+                ? sch.activeDays
+                : [1, 2, 3, 4, 5];
+            const isCustomDaysOpen = customDaysOpenForScheduleId === sch.id;
 
-                <div className="flex flex-wrap items-center gap-2 shrink-0">
-                  {members.length > 0 && (
+            // Show Monday-Friday active days by default, plus Saturday/Sunday when Custom Hari is open or explicitly customized
+            const visibleWeekDays = MONDAY_FIRST_DAYS.filter((d) => {
+              if (!effectiveActiveDays.includes(d)) return false;
+              if (d >= 1 && d <= 5) return true;
+              return isCustomDaysOpen || effectiveActiveDays.length < 7;
+            });
+
+            return (
+              <article key={sch.id} className="card-3d overflow-hidden">
+                {/* Compact, Clear Card Header */}
+                <div
+                  className={`p-4 sm:p-5 border-b-2 ${accent.bg} flex flex-col sm:flex-row sm:items-center justify-between gap-3`}
+                >
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-2 text-xs font-bold">
+                      <span
+                        className={`px-2.5 py-0.5 rounded-lg text-[11px] ${accent.badge}`}
+                      >
+                        {sch.mode === 'custom'
+                          ? 'Tanggal Khusus'
+                          : formatWeekCycleLabel(sch.activeWeeks)}
+                      </span>
+                      <span className="font-mono text-stone-700 inline-flex items-center gap-1 tabular-nums">
+                        <Clock className="w-3.5 h-3.5 text-orange-500" />
+                        {sch.startTime} – {sch.endTime} WIB
+                      </span>
+                      <span aria-hidden="true" className="text-stone-300">
+                        ·
+                      </span>
+                      <span className="text-stone-600 inline-flex items-center gap-1">
+                        <MapPin className="w-3.5 h-3.5 text-orange-500" />
+                        {sch.location}
+                      </span>
+                      <span aria-hidden="true" className="text-stone-300">
+                        ·
+                      </span>
+                      <span className="text-stone-600 font-semibold">
+                        {MODE_LABELS[sch.mode]}
+                      </span>
+                      {sch.mode !== 'custom' && (
+                        <>
+                          <span aria-hidden="true" className="text-stone-300">
+                            ·
+                          </span>
+                          <span className="text-sky-800 bg-white/80 border border-sky-200 px-2 py-0.5 rounded-md text-[11px]">
+                            Hari: {formatActiveDaysLabel(effectiveActiveDays)}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                    <h2 className="text-lg font-bold text-stone-900">
+                      {sch.title}
+                    </h2>
+                  </div>
+
+                  {/* Card Actions: Custom Hari, Edit & Delete */}
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    {sch.mode !== 'custom' && (
+                      <button
+                        type="button"
+                        data-testid={`btn-custom-days-${sch.id}`}
+                        onClick={() =>
+                          setCustomDaysOpenForScheduleId(
+                            isCustomDaysOpen ? null : sch.id
+                          )
+                        }
+                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl border-2 transition-colors whitespace-nowrap ${
+                          isCustomDaysOpen
+                            ? 'bg-orange-500 border-orange-600 text-white'
+                            : 'bg-white border-[#E7D5C0] text-stone-700 hover:bg-orange-50'
+                        }`}
+                      >
+                        <Calendar className="w-3.5 h-3.5 text-orange-500 shrink-0" />
+                        <span>Custom Hari</span>
+                      </button>
+                    )}
+
                     <button
                       type="button"
-                      onClick={() => {
-                        setQuickAssignMemberId(members[0]?.id || '');
-                        setQuickAssignScheduleId(
-                          quickAssignScheduleId === sch.id ? null : sch.id
-                        );
-                      }}
+                      onClick={() => openEditForm(sch)}
                       className="btn-3d-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold whitespace-nowrap"
                     >
-                      <UserPlus className="w-3.5 h-3.5" />
-                      <span>Tambah Petugas ke Jadwal</span>
+                      <Edit3 className="w-3.5 h-3.5 text-sky-700" />
+                      <span>Edit Jadwal & Petugas</span>
                     </button>
-                  )}
 
-                  <button
-                    type="button"
-                    onClick={() => openEditForm(sch)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-sky-800 bg-sky-50 border-2 border-sky-200 hover:bg-sky-100 rounded-xl transition-colors whitespace-nowrap"
-                  >
-                    <Edit3 className="w-3.5 h-3.5" />
-                    <span>Ubah Jadwal</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => onDeleteSchedule(sch.id)}
-                    aria-label={`Hapus ${sch.title}`}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-rose-700 bg-rose-50 border-2 border-rose-200 hover:bg-rose-100 rounded-xl transition-colors whitespace-nowrap"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    <span>Hapus</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Quick Inline Add Member Bar */}
-              {quickAssignScheduleId === sch.id && (
-                <div className="px-5 py-3.5 bg-[#FFF8EE] border-b-2 border-[#F3E3D0] flex flex-wrap items-center gap-3">
-                  <span className="text-xs font-bold text-stone-800">
-                    Masukkan Anggota ke {sch.title}:
-                  </span>
-                  {sch.mode === 'mingguan' && (
-                    <select
-                      aria-label="Pilih Hari Penugasan"
-                      value={quickAssignDay}
-                      onChange={(e) =>
-                        setQuickAssignDay(Number(e.target.value))
-                      }
-                      className="px-2.5 py-1.5 text-xs bg-white border-2 border-[#E7D5C0] rounded-xl"
+                    <button
+                      type="button"
+                      onClick={() => onDeleteSchedule(sch.id)}
+                      aria-label={`Hapus ${sch.title}`}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-bold text-rose-700 bg-rose-50 border-2 border-rose-200 hover:bg-rose-100 rounded-xl transition-colors whitespace-nowrap"
+                      title="Hapus Jadwal Ini"
                     >
-                      {[1, 2, 3, 4, 5, 6, 0].map((d) => (
-                        <option key={d} value={d}>
-                          Hari {DAY_NAMES_ID[d]}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                  <select
-                    aria-label="Pilih Anggota Piket"
-                    value={quickAssignMemberId}
-                    onChange={(e) => setQuickAssignMemberId(e.target.value)}
-                    className="px-2.5 py-1.5 text-xs bg-white border-2 border-[#E7D5C0] rounded-xl"
-                  >
-                    {members.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.name} ({m.kelas})
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    onClick={() => handleQuickAddMemberToSchedule(sch)}
-                    className="btn-3d-primary px-3 py-1.5 text-xs font-bold"
-                  >
-                    Simpan Penugasan
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setQuickAssignScheduleId(null)}
-                    className="px-2.5 py-1.5 text-xs font-bold text-stone-600 hover:text-stone-900"
-                  >
-                    Tutup
-                  </button>
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span className="hidden sm:inline">Hapus</span>
+                    </button>
+                  </div>
                 </div>
-              )}
 
-              {/* Schedule Matrix Breakdown based on Mode */}
-              <div className="p-5">
-                {sch.mode === 'mingguan' && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-7 divide-y sm:divide-y-0 sm:divide-x-2 divide-[#F3E3D0]">
-                    {[1, 2, 3, 4, 5, 6, 0].map((dayNum, idx) => {
-                      const dayMembers = sch.weeklyAssignments[dayNum] || [];
-                      return (
-                        <div
-                          key={dayNum}
-                          className={`py-2 sm:py-1 ${
-                            idx === 0
-                              ? 'sm:pr-3'
-                              : idx === 6
-                              ? 'sm:pl-3'
-                              : 'sm:px-3'
-                          } space-y-2`}
-                        >
-                          <div className="flex items-center justify-between border-b border-[#F3E3D0] pb-1.5">
-                            <span className="text-xs font-bold text-stone-800">
-                              {DAY_NAMES_ID[dayNum]}
-                            </span>
-                            <span className="text-[11px] font-mono tabular-nums text-stone-500">
-                              {dayMembers.length} org
-                            </span>
-                          </div>
-                          {dayMembers.length === 0 ? (
-                            <p className="text-xs text-stone-400 italic">
-                              Kosong
-                            </p>
-                          ) : (
-                            <ul className="space-y-1.5">
-                              {dayMembers.map((mId) => {
-                                const m = memberMap.get(mId);
-                                if (!m) return null;
-                                return (
-                                  <li
-                                    key={mId}
-                                    className="flex items-center justify-between gap-1 text-xs text-stone-700 font-medium"
-                                  >
-                                    <span className="truncate" title={m.name}>
-                                      {m.name}
-                                    </span>
-                                    <button
-                                      type="button"
-                                      onClick={() =>
-                                        handleRemoveMemberFromScheduleDay(
-                                          sch,
-                                          dayNum,
-                                          mId
-                                        )
-                                      }
-                                      aria-label={`Keluarkan ${m.name} dari hari ${DAY_NAMES_ID[dayNum]}`}
-                                      className="text-stone-400 hover:text-rose-600 p-0.5 shrink-0"
-                                      title="Hapus dari hari ini"
-                                    >
-                                      <X className="w-3 h-3" />
-                                    </button>
-                                  </li>
-                                );
-                              })}
-                            </ul>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-
-                {sch.mode === 'harian' && (
-                  <div className="space-y-3">
-                    <div className="text-xs text-stone-500">
-                      Hari Aktif:{' '}
-                      <span className="font-bold text-stone-800">
-                        {sch.activeDays.map((d) => DAY_NAMES_ID[d]).join(', ')}
+                {/* Inline Custom Hari Bar (Toggles Senin..Minggu directly on the card) */}
+                {isCustomDaysOpen && sch.mode !== 'custom' && (
+                  <div
+                    data-testid={`panel-custom-days-${sch.id}`}
+                    className="p-3.5 bg-[#FFF6E8] border-b-2 border-[#F3DEC0] space-y-2.5"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-xs font-bold text-stone-800">
+                        Pilih Hari Aktif untuk{' '}
+                        <strong className="text-orange-700">{sch.title}</strong>{' '}
+                        (Klik hari untuk mengaktifkan / meliburkan):
                       </span>
-                    </div>
-                    {sch.dailyMembers.length === 0 ? (
-                      <p className="text-xs text-stone-400 italic">
-                        Belum ada petugas harian yang dipilih.
-                      </p>
-                    ) : (
-                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 divide-y sm:divide-y-0 sm:divide-x-2 divide-[#F3E3D0]">
-                        {sch.dailyMembers.map((mId, idx) => {
-                          const m = memberMap.get(mId);
-                          if (!m) return null;
-                          return (
-                            <div
-                              key={mId}
-                              className={`flex items-center justify-between py-2 ${
-                                idx === 0 ? 'sm:pr-4' : 'sm:px-4'
-                              }`}
-                            >
-                              <div className="min-w-0 pr-2">
-                                <p className="text-xs font-bold text-stone-900 truncate">
-                                  {m.name}
-                                </p>
-                                <p className="text-[11px] text-stone-500 truncate">
-                                  {m.kelas} · {m.jabatan}
-                                </p>
-                              </div>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  handleRemoveMemberFromScheduleDay(
-                                    sch,
-                                    'daily',
-                                    mId
-                                  )
-                                }
-                                aria-label={`Keluarkan ${m.name} dari ${sch.title}`}
-                                className="p-1 text-stone-400 hover:text-rose-600"
-                              >
-                                <X className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                          );
-                        })}
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleInlinePresetDays(sch, [1, 2, 3, 4, 5])
+                          }
+                          className="px-2.5 py-1 text-[11px] font-bold rounded-lg bg-white border border-[#E7D5C0] text-stone-700 hover:bg-orange-50"
+                        >
+                          Senin–Jumat
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleInlinePresetDays(sch, [1, 2, 3, 4, 5, 6])
+                          }
+                          className="px-2.5 py-1 text-[11px] font-bold rounded-lg bg-white border border-[#E7D5C0] text-stone-700 hover:bg-orange-50"
+                        >
+                          Senin–Sabtu
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleInlinePresetDays(sch, [0, 1, 2, 3, 4, 5, 6])
+                          }
+                          className="px-2.5 py-1 text-[11px] font-bold rounded-lg bg-white border border-[#E7D5C0] text-stone-700 hover:bg-orange-50"
+                        >
+                          Setiap Hari
+                        </button>
                       </div>
-                    )}
-                  </div>
-                )}
-
-                {sch.mode === 'custom' && (
-                  <div className="space-y-3">
-                    <div className="text-xs text-stone-500">
-                      Tanggal Pelaksanaan Custom ({sch.customDates.length} hari):
                     </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 divide-y sm:divide-y-0 sm:divide-x-2 divide-[#F3E3D0]">
-                      {sch.customDates.map((dt, idx) => {
-                        const assignedIds =
-                          sch.customDateAssignments[dt] || sch.dailyMembers;
+
+                    <div className="grid grid-cols-2 sm:grid-cols-7 gap-1.5">
+                      {MONDAY_FIRST_DAYS.map((dNum) => {
+                        const isDayOn = effectiveActiveDays.includes(dNum);
                         return (
-                          <div
-                            key={dt}
-                            className={`py-2 ${
-                              idx === 0 ? 'sm:pr-4' : 'sm:px-4'
-                            } space-y-2`}
+                          <button
+                            key={dNum}
+                            type="button"
+                            data-testid={`toggle-day-${sch.id}-${dNum}`}
+                            onClick={() =>
+                              handleInlineToggleScheduleDay(sch, dNum)
+                            }
+                            className={`py-2 px-2.5 rounded-xl border-2 text-xs font-bold flex items-center justify-between gap-1.5 transition-all ${
+                              isDayOn
+                                ? 'bg-emerald-600 border-emerald-700 text-white shadow-xs'
+                                : 'bg-white border-stone-200 text-stone-400 hover:border-stone-300'
+                            }`}
                           >
-                            <div className="flex items-center justify-between border-b border-[#F3E3D0] pb-1.5">
-                              <span className="text-xs font-mono font-bold text-stone-800 tabular-nums">
-                                {dt}
-                              </span>
-                              <span className="text-[11px] text-stone-500">
-                                {assignedIds.length} petugas
-                              </span>
-                            </div>
-                            <ul className="space-y-1">
-                              {assignedIds.map((mId) => {
-                                const m = memberMap.get(mId);
-                                return m ? (
-                                  <li
-                                    key={mId}
-                                    className="text-xs text-stone-700 font-medium truncate"
-                                  >
-                                    {m.name} ({m.kelas})
-                                  </li>
-                                ) : null;
-                              })}
-                            </ul>
-                          </div>
+                            <span>{DAY_NAMES_ID[dNum]}</span>
+                            <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-black/15">
+                              {isDayOn ? 'Aktif' : 'Libur'}
+                            </span>
+                          </button>
                         );
                       })}
                     </div>
                   </div>
                 )}
-              </div>
-            </article>
-          ))}
+
+                {/* Inline Quick-Add Member Bar (Opens when clicking "+ Tambah" on any day, daily pos, or custom date) */}
+                {quickAssignTarget &&
+                  quickAssignTarget.scheduleId === sch.id && (
+                    <div className="p-3.5 bg-[#FFF8EE] border-b-2 border-[#F3E3D0] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                      <div className="flex items-center gap-2 text-xs font-bold text-stone-800">
+                        <UserPlus className="w-4 h-4 text-orange-500 shrink-0" />
+                        <span>
+                          Tambah Petugas ke{' '}
+                          <strong className="text-orange-700">
+                            {quickAssignTarget.dayOrMode === 'daily'
+                              ? `${sch.title} (Harian)`
+                              : typeof quickAssignTarget.dayOrMode === 'number'
+                              ? `Hari ${
+                                  DAY_NAMES_ID[quickAssignTarget.dayOrMode]
+                                }`
+                              : `Tanggal ${quickAssignTarget.dayOrMode}`}
+                          </strong>
+                          :
+                        </span>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        <input
+                          type="text"
+                          value={quickAssignFilter}
+                          onChange={(e) => {
+                            setQuickAssignFilter(e.target.value);
+                            const firstMatch = members.find(
+                              (m) =>
+                                m.name
+                                  .toLowerCase()
+                                  .includes(e.target.value.toLowerCase()) ||
+                                m.kelas
+                                  .toLowerCase()
+                                  .includes(e.target.value.toLowerCase())
+                            );
+                            if (firstMatch) {
+                              setQuickAssignMemberId(firstMatch.id);
+                            }
+                          }}
+                          placeholder="Ketik nama untuk cari..."
+                          className="px-2.5 py-1.5 text-xs bg-white border-2 border-[#E7D5C0] rounded-xl w-40 focus:outline-none focus:border-orange-400"
+                        />
+
+                        <select
+                          aria-label="Pilih Anggota Piket"
+                          value={quickAssignMemberId}
+                          onChange={(e) =>
+                            setQuickAssignMemberId(e.target.value)
+                          }
+                          className="px-2.5 py-1.5 text-xs font-bold bg-white border-2 border-[#E7D5C0] rounded-xl text-stone-800 max-w-xs"
+                        >
+                          {quickFilteredMembers.map((m) => (
+                            <option key={m.id} value={m.id}>
+                              {m.name} ({getMemberOrgLabel(m)} · {m.kelas})
+                            </option>
+                          ))}
+                        </select>
+
+                        <button
+                          type="button"
+                          onClick={() => handleQuickAddMember(sch)}
+                          className="btn-3d-primary px-3 py-1.5 text-xs font-bold"
+                        >
+                          Tambahkan
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setQuickAssignTarget(null);
+                            setQuickAssignFilter('');
+                          }}
+                          className="px-2.5 py-1.5 text-xs font-bold text-stone-500 hover:text-stone-800"
+                        >
+                          Batal
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                {/* Schedule Content Body */}
+                <div className="p-4 sm:p-5">
+                  {sch.mode === 'mingguan' && (
+                    <div
+                      className={`grid grid-cols-1 sm:grid-cols-2 ${
+                        visibleWeekDays.length >= 6
+                          ? 'lg:grid-cols-6'
+                          : 'lg:grid-cols-5'
+                      } gap-3`}
+                    >
+                      {visibleWeekDays.map((dayNum) => {
+                        const rawDayMembers =
+                          sch.weeklyAssignments[dayNum] || [];
+                        return (
+                          <div
+                            key={dayNum}
+                            className="p-3 rounded-2xl bg-[#FFFDF9] border-2 border-[#F3E3D0] flex flex-col justify-between space-y-2.5"
+                          >
+                            <div className="space-y-2">
+                              <div className="flex items-center justify-between border-b border-[#F3E3D0] pb-1.5">
+                                <span className="text-xs font-bold text-stone-900">
+                                  {DAY_NAMES_ID[dayNum]}
+                                </span>
+                                <span className="text-[11px] font-mono font-bold tabular-nums text-stone-500">
+                                  {rawDayMembers.length} petugas
+                                </span>
+                              </div>
+
+                              {rawDayMembers.length === 0 ? (
+                                <p className="text-xs text-stone-400 italic py-1">
+                                  Belum ada petugas
+                                </p>
+                              ) : (
+                                <ul className="space-y-1.5">
+                                  {rawDayMembers.map((rawId) => {
+                                    const normId = normalizeMemberId(rawId);
+                                    const m = memberMap.get(normId);
+                                    if (!m) return null;
+                                    const orgLabel = getMemberOrgLabel(m);
+                                    return (
+                                      <li
+                                        key={normId}
+                                        className="flex items-center justify-between gap-1.5 px-2 py-1.5 rounded-xl bg-white border border-[#EFE0CE] text-xs"
+                                      >
+                                        <div className="min-w-0 flex-1">
+                                          <p
+                                            className="font-bold text-stone-900 truncate"
+                                            title={m.name}
+                                          >
+                                            {m.name}
+                                          </p>
+                                          <div className="flex items-center gap-1 mt-0.5">
+                                            <span
+                                              className={`text-[9px] font-extrabold px-1 rounded ${
+                                                orgLabel === 'OSIS'
+                                                  ? 'bg-orange-100 text-orange-800'
+                                                  : 'bg-indigo-100 text-indigo-800'
+                                              }`}
+                                            >
+                                              {orgLabel}
+                                            </span>
+                                            <span className="text-[10px] font-mono font-bold text-sky-700">
+                                              {m.kelas}
+                                            </span>
+                                          </div>
+                                        </div>
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            handleRemoveMemberFromScheduleDay(
+                                              sch,
+                                              dayNum,
+                                              normId
+                                            )
+                                          }
+                                          aria-label={`Keluarkan ${m.name} dari hari ${DAY_NAMES_ID[dayNum]}`}
+                                          className="text-stone-400 hover:text-rose-600 p-1 rounded-lg hover:bg-rose-50 shrink-0"
+                                          title="Hapus dari hari ini"
+                                        >
+                                          <X className="w-3.5 h-3.5" />
+                                        </button>
+                                      </li>
+                                    );
+                                  })}
+                                </ul>
+                              )}
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setQuickAssignMemberId(members[0]?.id || '');
+                                setQuickAssignFilter('');
+                                setQuickAssignTarget({
+                                  scheduleId: sch.id,
+                                  dayOrMode: dayNum,
+                                });
+                              }}
+                              className="w-full py-1.5 px-2 rounded-xl border border-dashed border-orange-300 text-[11px] font-bold text-orange-700 hover:bg-orange-50 inline-flex items-center justify-center gap-1 transition-colors"
+                            >
+                              <Plus className="w-3 h-3" />
+                              <span>Tambah ke {DAY_NAMES_ID[dayNum]}</span>
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {sch.mode === 'harian' && (
+                    <div className="space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-xs text-stone-600">
+                          Bertugas rutin setiap{' '}
+                          <strong className="text-stone-900">
+                            {formatActiveDaysLabel(effectiveActiveDays)}
+                          </strong>{' '}
+                          pada{' '}
+                          <strong className="text-emerald-700">
+                            {formatWeekCycleLabel(sch.activeWeeks)}
+                          </strong>{' '}
+                          ({sch.dailyMembers.length} petugas):
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setQuickAssignMemberId(members[0]?.id || '');
+                            setQuickAssignFilter('');
+                            setQuickAssignTarget({
+                              scheduleId: sch.id,
+                              dayOrMode: 'daily',
+                            });
+                          }}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 text-xs font-bold transition-colors"
+                        >
+                          <UserPlus className="w-3.5 h-3.5" />
+                          <span>Tambah Petugas Harian</span>
+                        </button>
+                      </div>
+
+                      {sch.dailyMembers.length === 0 ? (
+                        <p className="text-xs text-stone-400 italic">
+                          Belum ada petugas harian yang dipilih.
+                        </p>
+                      ) : (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+                          {sch.dailyMembers.map((rawId, idx) => {
+                            const normId = normalizeMemberId(rawId);
+                            const m = memberMap.get(normId);
+                            if (!m) return null;
+                            const orgLabel = getMemberOrgLabel(m);
+                            return (
+                              <div
+                                key={normId}
+                                className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-[#FFFDF9] border-2 border-[#F3E3D0]"
+                              >
+                                <div className="min-w-0 flex-1">
+                                  <p className="text-xs font-bold text-stone-900 truncate">
+                                    {idx + 1}. {m.name}
+                                  </p>
+                                  <div className="flex items-center gap-1.5 mt-0.5">
+                                    <span
+                                      className={`text-[9px] font-extrabold px-1.5 py-0.2 rounded ${
+                                        orgLabel === 'OSIS'
+                                          ? 'bg-orange-100 text-orange-800'
+                                          : 'bg-indigo-100 text-indigo-800'
+                                      }`}
+                                    >
+                                      {orgLabel}
+                                    </span>
+                                    <span className="text-[11px] font-mono font-bold text-sky-700">
+                                      Kelas {m.kelas}
+                                    </span>
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleRemoveMemberFromScheduleDay(
+                                      sch,
+                                      'daily',
+                                      normId
+                                    )
+                                  }
+                                  aria-label={`Keluarkan ${m.name} dari ${sch.title}`}
+                                  className="p-1 text-stone-400 hover:text-rose-600 rounded-lg hover:bg-rose-50 shrink-0"
+                                  title="Keluarkan dari jadwal ini"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {sch.mode === 'custom' && (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between text-xs text-stone-600">
+                        <span>
+                          Tanggal Pelaksanaan Khusus ({sch.customDates.length}{' '}
+                          hari terjadwal):
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                        {sch.customDates.map((dt) => {
+                          const assignedIds =
+                            sch.customDateAssignments[dt] || sch.dailyMembers;
+                          return (
+                            <div
+                              key={dt}
+                              className="p-3 rounded-2xl bg-[#FFFDF9] border-2 border-[#F3E3D0] flex flex-col justify-between space-y-2.5"
+                            >
+                              <div className="space-y-2">
+                                <div className="flex items-center justify-between border-b border-[#F3E3D0] pb-1.5">
+                                  <div>
+                                    <p className="text-xs font-bold text-stone-900">
+                                      {formatFullDateId(dt)}
+                                    </p>
+                                    <p className="text-[10px] font-mono text-stone-500">
+                                      {dt} · {assignedIds.length} petugas
+                                    </p>
+                                  </div>
+                                </div>
+                                <ul className="space-y-1.5">
+                                  {assignedIds.map((rawId) => {
+                                    const normId = normalizeMemberId(rawId);
+                                    const m = memberMap.get(normId);
+                                    if (!m) return null;
+                                    const orgLabel = getMemberOrgLabel(m);
+                                    return (
+                                      <li
+                                        key={normId}
+                                        className="flex items-center justify-between gap-1.5 px-2 py-1.5 rounded-xl bg-white border border-[#EFE0CE] text-xs"
+                                      >
+                                        <div className="min-w-0 flex-1">
+                                          <p className="font-bold text-stone-900 truncate">
+                                            {m.name}
+                                          </p>
+                                          <span className="text-[10px] font-mono text-sky-700 font-bold">
+                                            {orgLabel} · {m.kelas}
+                                          </span>
+                                        </div>
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            handleRemoveMemberFromScheduleDay(
+                                              sch,
+                                              dt,
+                                              normId
+                                            )
+                                          }
+                                          className="text-stone-400 hover:text-rose-600 p-1 rounded-lg"
+                                          title="Hapus dari tanggal ini"
+                                        >
+                                          <X className="w-3.5 h-3.5" />
+                                        </button>
+                                      </li>
+                                    );
+                                  })}
+                                </ul>
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setQuickAssignMemberId(members[0]?.id || '');
+                                  setQuickAssignFilter('');
+                                  setQuickAssignTarget({
+                                    scheduleId: sch.id,
+                                    dayOrMode: dt,
+                                  });
+                                }}
+                                className="w-full py-1.5 px-2 rounded-xl border border-dashed border-orange-300 text-[11px] font-bold text-orange-700 hover:bg-orange-50 inline-flex items-center justify-center gap-1"
+                              >
+                                <Plus className="w-3 h-3" />
+                                <span>Tambah Petugas</span>
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </article>
+            );
+          })}
         </div>
       )}
 
-      {/* Active Temporary Schedule Swaps Section */}
-      <section className="card-3d p-5 md:p-6 space-y-4">
-        <div className="flex items-center justify-between">
+      {/* 3. Active Temporary Schedule Swaps Section */}
+      <section className="card-3d p-4 sm:p-6 space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <div>
             <h2 className="text-base font-bold text-stone-900">
-              Daftar Pergantian / Tukar Jadwal Sementara
+              Riwayat Tukar / Ganti Piket Sementara
             </h2>
             <p className="text-xs text-stone-500">
-              Catatan pertukaran atau penggantian petugas piket pada tanggal
-              tertentu.
+              Daftar pertukaran petugas piket khusus pada tanggal tertentu tanpa
+              mengubah jadwal permanen.
             </p>
           </div>
-          <span className="text-xs font-mono font-bold tabular-nums text-stone-500">
-            {swaps.length} pergantian tercatat
+          <span className="text-xs font-mono font-bold tabular-nums text-stone-600 bg-[#FFF8EE] border border-[#EBD5B8] px-3 py-1 rounded-xl shrink-0">
+            {swaps.length} pergantian aktif
           </span>
         </div>
 
         {swaps.length === 0 ? (
-          <p className="text-xs text-stone-500 py-4">
-            Belum ada pergantian jadwal sementara.
+          <p className="text-xs text-stone-500 py-2">
+            Belum ada pergantian jadwal sementara yang tercatat.
           </p>
         ) : (
           <div className="overflow-x-auto">
@@ -843,8 +1336,12 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
               <tbody className="divide-y divide-[#F7ECE0] text-xs">
                 {swaps.map((sw) => {
                   const sch = schedules.find((s) => s.id === sw.scheduleId);
-                  const orig = memberMap.get(sw.originalMemberId);
-                  const repl = memberMap.get(sw.replacementMemberId);
+                  const orig = memberMap.get(
+                    normalizeMemberId(sw.originalMemberId)
+                  );
+                  const repl = memberMap.get(
+                    normalizeMemberId(sw.replacementMemberId)
+                  );
                   return (
                     <tr key={sw.id} className="hover:bg-[#FFFBF4]">
                       <td className="py-3 pr-4 font-mono tabular-nums text-stone-800 whitespace-nowrap">
@@ -878,31 +1375,36 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
         )}
       </section>
 
-      {/* Modal Form: Add / Edit Schedule */}
+      {/* 4. Simplified Modal Form: Add / Edit Schedule with Custom Hari & Member Search */}
       {showFormModal && (
         <div
-          className="fixed inset-0 z-50 bg-stone-900/50 flex items-center justify-center p-4 overflow-y-auto"
+          className="fixed inset-0 z-50 bg-stone-900/50 flex items-center justify-center p-3 sm:p-4 overflow-y-auto"
           role="dialog"
           aria-modal="true"
           aria-labelledby="modal-schedule-title"
         >
-          <div className="card-3d max-w-2xl w-full p-6 space-y-5 max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between border-b-2 border-[#F3E3D0] pb-4">
-              <h2
-                id="modal-schedule-title"
-                className="text-lg font-bold text-stone-900"
-              >
-                {editingScheduleId
-                  ? 'Ubah Jadwal Piket OSIS'
-                  : 'Tambah Jadwal Piket Baru'}
-              </h2>
+          <div className="card-3d max-w-2xl w-full p-5 sm:p-6 space-y-4 max-h-[92vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b-2 border-[#F3E3D0] pb-3.5">
+              <div>
+                <span className="text-xs font-bold text-orange-600">
+                  Formulir Jadwal & Custom Hari Piket OSIS / MPK
+                </span>
+                <h2
+                  id="modal-schedule-title"
+                  className="text-lg font-bold text-stone-900"
+                >
+                  {editingScheduleId
+                    ? 'Edit Jadwal, Hari Aktif & Petugas'
+                    : 'Tambah Jadwal Piket Baru'}
+                </h2>
+              </div>
               <button
                 type="button"
                 onClick={() => setShowFormModal(false)}
                 aria-label="Tutup Modal"
                 className="p-1.5 text-stone-400 hover:text-stone-700 rounded-lg"
               >
-                <X className="w-4 h-4" />
+                <X className="w-5 h-5" />
               </button>
             </div>
 
@@ -913,13 +1415,14 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
                 </div>
               )}
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {/* Basic Info: Nama Pos & Lokasi */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                 <div>
                   <label
                     htmlFor="sch-title-input"
                     className="block text-xs font-bold text-stone-700 mb-1"
                   >
-                    Nama Jadwal Piket
+                    Nama Jadwal / Pos Piket
                   </label>
                   <input
                     id="sch-title-input"
@@ -927,7 +1430,7 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
                     required
                     value={title}
                     onChange={(e) => setTitle(e.target.value)}
-                    placeholder="Contoh: Piket Ruang Sekretariat Pagi"
+                    placeholder="Contoh: Jadwal Piket Warsis / Piket Acara Khusus"
                     className="w-full px-3 py-2 text-xs bg-white border-2 border-[#E7D5C0] rounded-xl focus:outline-none focus:border-orange-400"
                   />
                 </div>
@@ -937,7 +1440,7 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
                     htmlFor="sch-location-input"
                     className="block text-xs font-bold text-stone-700 mb-1"
                   >
-                    Lokasi / Pos Piket
+                    Lokasi Tugas
                   </label>
                   <input
                     id="sch-location-input"
@@ -945,29 +1448,34 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
                     required
                     value={location}
                     onChange={(e) => setLocation(e.target.value)}
-                    placeholder="Contoh: Ruang OSIS Lt. 1"
+                    placeholder="Contoh: Warung OSIS (Warsis)"
                     className="w-full px-3 py-2 text-xs bg-white border-2 border-[#E7D5C0] rounded-xl focus:outline-none focus:border-orange-400"
                   />
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              {/* Sistem Waktu & Jam */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
                 <div>
                   <label
                     htmlFor="sch-mode-select"
                     className="block text-xs font-bold text-stone-700 mb-1"
                   >
-                    Sistem Waktu Piket
+                    Sistem Penugasan
                   </label>
                   <select
                     id="sch-mode-select"
                     value={mode}
                     onChange={(e) => setMode(e.target.value as ScheduleMode)}
-                    className="w-full px-3 py-2 text-xs bg-white border-2 border-[#E7D5C0] rounded-xl focus:outline-none focus:border-orange-400"
+                    className="w-full px-3 py-2 text-xs font-bold bg-white border-2 border-[#E7D5C0] rounded-xl focus:outline-none focus:border-orange-400"
                   >
-                    <option value="mingguan">Mingguan (Per Hari)</option>
-                    <option value="harian">Harian (Setiap Hari Aktif)</option>
-                    <option value="custom">Custom (Tanggal Tertentu)</option>
+                    <option value="mingguan">Mingguan (Beda per Hari)</option>
+                    <option value="harian">
+                      Harian (Sama di Hari yang Dipilih)
+                    </option>
+                    <option value="custom">
+                      Custom Tanggal (Pilih Tanggal Kalender)
+                    </option>
                   </select>
                 </div>
 
@@ -976,7 +1484,7 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
                     htmlFor="sch-start-input"
                     className="block text-xs font-bold text-stone-700 mb-1"
                   >
-                    Jam Mulai
+                    Jam Mulai (WIB)
                   </label>
                   <input
                     id="sch-start-input"
@@ -992,7 +1500,7 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
                     htmlFor="sch-end-input"
                     className="block text-xs font-bold text-stone-700 mb-1"
                   >
-                    Jam Selesai
+                    Jam Selesai (WIB)
                   </label>
                   <input
                     id="sch-end-input"
@@ -1004,276 +1512,289 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
                 </div>
               </div>
 
-              <div>
-                <label
-                  htmlFor="sch-desc-input"
-                  className="block text-xs font-bold text-stone-700 mb-1"
-                >
-                  Deskripsi Singkat
-                </label>
-                <input
-                  id="sch-desc-input"
-                  type="text"
-                  value={description}
-                  onChange={(e) => setDescription(e.target.value)}
-                  placeholder="Keterangan singkat tanggung jawab pos piket..."
-                  className="w-full px-3 py-2 text-xs bg-white border-2 border-[#E7D5C0] rounded-xl"
-                />
-              </div>
-
-              {/* Siklus Minggu Selection: Setiap Minggu vs Minggu 1 - Minggu 4 */}
+              {/* Siklus Minggu Selection + Custom Hari Aktif (Senin..Minggu) */}
               {mode !== 'custom' && (
-                <div className="p-4 bg-[#FFF8EE] border-2 border-[#F3E3D0] rounded-2xl space-y-3">
-                  <div>
-                    <p className="text-xs font-bold text-stone-800">
-                      Siklus Minggu Pelaksanaan (Setiap Minggu / Minggu 1 – Minggu 4)
-                    </p>
-                    <p className="text-[11px] text-stone-500">
-                      Pilih apakah jadwal ini berlaku setiap minggu atau hanya pada minggu tertentu dalam satu bulan.
-                    </p>
-                  </div>
-
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setWeekSelectionMode('setiap_minggu');
-                        setActiveWeeks([1, 2, 3, 4]);
-                      }}
-                      className={`px-3 py-1.5 text-xs font-bold rounded-xl border-2 transition-colors ${
-                        weekSelectionMode === 'setiap_minggu'
-                          ? 'bg-orange-500 border-orange-600 text-white'
-                          : 'bg-white border-[#E7D5C0] text-stone-700 hover:bg-orange-50'
-                      }`}
-                    >
-                      Setiap Minggu (Rutin)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setWeekSelectionMode('pilih_minggu');
-                        if (activeWeeks.length === 4) {
-                          setActiveWeeks([1]);
-                        }
-                      }}
-                      className={`px-3 py-1.5 text-xs font-bold rounded-xl border-2 transition-colors ${
-                        weekSelectionMode === 'pilih_minggu'
-                          ? 'bg-orange-500 border-orange-600 text-white'
-                          : 'bg-white border-[#E7D5C0] text-stone-700 hover:bg-orange-50'
-                      }`}
-                    >
-                      Pilih Minggu (Minggu 1 – Minggu 4)
-                    </button>
-                  </div>
-
-                  {weekSelectionMode === 'pilih_minggu' && (
-                    <div className="pt-2 space-y-1.5">
-                      <p className="text-xs font-bold text-stone-700">
-                        Pilih minggu aktif (bisa pilih satu atau lebih minggu):
-                      </p>
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                        {[1, 2, 3, 4].map((wNum) => {
-                          const isSelected = activeWeeks.includes(wNum);
-                          return (
-                            <button
-                              key={wNum}
-                              type="button"
-                              onClick={() => toggleWeekNumber(wNum)}
-                              className={`py-2 px-3 text-xs font-bold rounded-xl border-2 transition-colors ${
-                                isSelected
-                                  ? 'bg-sky-500 border-sky-600 text-white'
-                                  : 'bg-white border-[#E7D5C0] text-stone-700 hover:bg-sky-50'
-                              }`}
-                            >
-                              Minggu {wNum}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Dynamic Configuration by Mode */}
-              {mode === 'harian' && (
-                <div className="p-4 bg-[#FFF8EE] border-2 border-[#F3E3D0] rounded-2xl space-y-3">
-                  <p className="text-xs font-bold text-stone-800">
-                    Pilih Hari Aktif & Anggota Piket Harian:
-                  </p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {[1, 2, 3, 4, 5, 6, 0].map((d) => (
+                <div className="p-3.5 bg-[#FFF8EE] border-2 border-[#F3E3D0] rounded-2xl space-y-3">
+                  {/* Siklus Minggu */}
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-stone-800">
+                        Berlaku pada Siklus Minggu:
+                      </span>
                       <button
-                        key={d}
                         type="button"
-                        onClick={() => toggleDayActive(d)}
-                        className={`px-2.5 py-1 text-xs font-bold rounded-lg border ${
-                          activeDays.includes(d)
-                            ? 'bg-orange-500 border-orange-600 text-white'
-                            : 'bg-white border-[#E7D5C0] text-stone-600'
-                        }`}
+                        onClick={() => setActiveWeeks([1, 2, 3, 4])}
+                        className="text-[11px] font-bold text-orange-600 hover:underline"
                       >
-                        {DAY_NAMES_ID[d]}
+                        Pilih Semua Minggu (M1–M4)
                       </button>
-                    ))}
-                  </div>
-                  {members.length === 0 ? (
-                    <p className="text-xs text-stone-500 italic pt-1">
-                      Belum ada anggota terdaftar. Anda dapat menambahkan
-                      anggota di tab Anggota Piket.
-                    </p>
-                  ) : (
-                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-2">
-                      {members.map((m) => (
-                        <label
-                          key={m.id}
-                          className="flex items-center gap-2 text-xs text-stone-700 bg-white p-2 rounded-xl border border-[#E7D5C0] cursor-pointer"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={dailyMembers.includes(m.id)}
-                            onChange={() => toggleDailyMember(m.id)}
-                            className="rounded border-stone-300 text-orange-500"
-                          />
-                          <span className="truncate">{m.name}</span>
-                        </label>
-                      ))}
                     </div>
-                  )}
-                </div>
-              )}
-
-              {mode === 'mingguan' && (
-                <div className="p-4 bg-[#FFF8EE] border-2 border-[#F3E3D0] rounded-2xl space-y-3">
-                  <p className="text-xs font-bold text-stone-800">
-                    Pilih Hari untuk Mengatur Petugas Mingguan:
-                  </p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {[1, 2, 3, 4, 5, 6, 0].map((d) => (
-                      <button
-                        key={d}
-                        type="button"
-                        onClick={() => setSelectedDayTab(d)}
-                        className={`px-2.5 py-1 text-xs font-bold rounded-lg border ${
-                          selectedDayTab === d
-                            ? 'bg-orange-500 border-orange-600 text-white'
-                            : 'bg-white border-[#E7D5C0] text-stone-700'
-                        }`}
-                      >
-                        {DAY_NAMES_ID[d]} (
-                        {(weeklyAssignments[d] || []).length})
-                      </button>
-                    ))}
-                  </div>
-                  {members.length === 0 ? (
-                    <p className="text-xs text-stone-500 italic pt-1">
-                      Belum ada anggota terdaftar. Anda dapat menambahkan
-                      anggota di tab Anggota Piket.
-                    </p>
-                  ) : (
-                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-2">
-                      {members.map((m) => {
-                        const checked = (
-                          weeklyAssignments[selectedDayTab] || []
-                        ).includes(m.id);
+                    <div className="grid grid-cols-4 gap-2">
+                      {[1, 2, 3, 4].map((wNum) => {
+                        const isSelected = activeWeeks.includes(wNum);
                         return (
-                          <label
-                            key={m.id}
-                            className="flex items-center gap-2 text-xs text-stone-700 bg-white p-2 rounded-xl border border-[#E7D5C0] cursor-pointer"
+                          <button
+                            key={wNum}
+                            type="button"
+                            onClick={() => toggleWeekNumber(wNum)}
+                            className={`py-1.5 px-3 text-xs font-bold rounded-xl border-2 transition-colors ${
+                              isSelected
+                                ? 'bg-orange-500 border-orange-600 text-white'
+                                : 'bg-white border-[#E7D5C0] text-stone-700 hover:bg-orange-50'
+                            }`}
                           >
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={() =>
-                                toggleWeeklyDayMember(selectedDayTab, m.id)
-                              }
-                              className="rounded border-stone-300 text-orange-500"
-                            />
-                            <span className="truncate">{m.name}</span>
-                          </label>
+                            Minggu {wNum}
+                          </button>
                         );
                       })}
                     </div>
-                  )}
-                </div>
-              )}
-
-              {mode === 'custom' && (
-                <div className="p-4 bg-[#FFF8EE] border-2 border-[#F3E3D0] rounded-2xl space-y-3">
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="date"
-                      value={newCustomDateInput}
-                      onChange={(e) => setNewCustomDateInput(e.target.value)}
-                      className="px-3 py-1.5 text-xs font-mono bg-white border-2 border-[#E7D5C0] rounded-xl"
-                    />
-                    <button
-                      type="button"
-                      onClick={handleAddCustomDate}
-                      className="btn-3d-primary px-3 py-1.5 text-xs font-bold"
-                    >
-                      Tambah Tanggal
-                    </button>
                   </div>
 
-                  <div className="flex flex-wrap gap-2">
-                    {customDates.map((dt) => (
-                      <span
-                        key={dt}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-mono bg-white border border-[#E7D5C0] rounded-lg"
-                      >
-                        {dt}
+                  {/* Custom Hari Jadwal (Senin..Minggu) */}
+                  <div className="pt-2.5 border-t border-[#F3E3D0] space-y-1.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-xs font-bold text-stone-800">
+                        Custom Hari Aktif Jadwal (Pilih Hari Pelaksanaan):
+                      </span>
+                      <div className="flex items-center gap-2 text-[11px] font-bold">
                         <button
                           type="button"
-                          onClick={() => handleRemoveCustomDate(dt)}
-                          className="text-stone-400 hover:text-rose-600"
+                          onClick={() => setActiveDays([1, 2, 3, 4, 5])}
+                          className="text-sky-700 hover:underline"
                         >
-                          <X className="w-3 h-3" />
+                          Senin–Jumat
                         </button>
-                      </span>
-                    ))}
-                  </div>
-
-                  {members.length > 0 && (
-                    <>
-                      <p className="text-xs font-bold text-stone-700 pt-1">
-                        Pilih Anggota Bertugas:
-                      </p>
-                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                        {members.map((m) => (
-                          <label
-                            key={m.id}
-                            className="flex items-center gap-2 text-xs text-stone-700 bg-white p-2 rounded-xl border border-[#E7D5C0] cursor-pointer"
-                          >
-                            <input
-                              type="checkbox"
-                              checked={dailyMembers.includes(m.id)}
-                              onChange={() => toggleDailyMember(m.id)}
-                              className="rounded border-stone-300 text-orange-500"
-                            />
-                            <span className="truncate">{m.name}</span>
-                          </label>
-                        ))}
+                        <span className="text-stone-300">·</span>
+                        <button
+                          type="button"
+                          onClick={() => setActiveDays([1, 2, 3, 4, 5, 6])}
+                          className="text-sky-700 hover:underline"
+                        >
+                          Senin–Sabtu
+                        </button>
+                        <span className="text-stone-300">·</span>
+                        <button
+                          type="button"
+                          onClick={() => setActiveDays([0, 1, 2, 3, 4, 5, 6])}
+                          className="text-sky-700 hover:underline"
+                        >
+                          Setiap Hari
+                        </button>
                       </div>
-                    </>
-                  )}
+                    </div>
+
+                    <div className="grid grid-cols-4 sm:grid-cols-7 gap-1.5">
+                      {MONDAY_FIRST_DAYS.map((dNum) => {
+                        const isDayActive = activeDays.includes(dNum);
+                        return (
+                          <button
+                            key={dNum}
+                            type="button"
+                            data-testid={`modal-day-toggle-${dNum}`}
+                            onClick={() => toggleModalActiveDay(dNum)}
+                            className={`py-1.5 px-2 text-xs font-bold rounded-xl border-2 transition-colors text-center ${
+                              isDayActive
+                                ? 'bg-emerald-600 border-emerald-700 text-white'
+                                : 'bg-white border-[#E7D5C0] text-stone-400 hover:text-stone-700'
+                            }`}
+                          >
+                            {DAY_NAMES_ID[dNum]}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
                 </div>
               )}
 
-              <div>
-                <label
-                  htmlFor="sch-tasks-textarea"
-                  className="block text-xs font-bold text-stone-700 mb-1"
-                >
-                  Daftar Tugas Pos Piket (1 baris per tugas)
-                </label>
-                <textarea
-                  id="sch-tasks-textarea"
-                  rows={3}
-                  value={tasksText}
-                  onChange={(e) => setTasksText(e.target.value)}
-                  className="w-full px-3 py-2 text-xs bg-white border-2 border-[#E7D5C0] rounded-xl"
-                />
+              {/* Member Selection with Search Filter */}
+              <div className="p-3.5 bg-[#FFF8EE] border-2 border-[#F3E3D0] rounded-2xl space-y-3">
+                {mode === 'mingguan' && (
+                  <div className="space-y-2">
+                    <span className="block text-xs font-bold text-stone-800">
+                      1. Pilih Hari untuk Mengatur Petugas:
+                    </span>
+                    <div className="grid grid-cols-4 sm:grid-cols-7 gap-1.5">
+                      {MONDAY_FIRST_DAYS.map((d) => {
+                        const isDayEnabled = activeDays.includes(d);
+                        return (
+                          <button
+                            key={d}
+                            type="button"
+                            onClick={() => setSelectedDayTab(d)}
+                            className={`py-2 px-1.5 text-xs font-bold rounded-xl border transition-colors text-center ${
+                              selectedDayTab === d
+                                ? 'bg-sky-600 border-sky-700 text-white'
+                                : isDayEnabled
+                                ? 'bg-white border-[#E7D5C0] text-stone-700 hover:bg-sky-50'
+                                : 'bg-stone-100 border-stone-200 text-stone-400'
+                            }`}
+                          >
+                            {DAY_NAMES_ID[d]} (
+                            {(weeklyAssignments[d] || []).length})
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {mode === 'custom' && (
+                  <div className="space-y-2.5 pb-2.5 border-b border-[#F3E3D0]">
+                    <span className="block text-xs font-bold text-stone-800">
+                      1. Tambah & Pilih Tanggal Custom Pelaksanaan Piket:
+                    </span>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        type="date"
+                        aria-label="Pilih tanggal custom"
+                        value={newCustomDateInput}
+                        onChange={(e) => setNewCustomDateInput(e.target.value)}
+                        className="px-3 py-1.5 text-xs font-mono bg-white border-2 border-[#E7D5C0] rounded-xl"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleAddCustomDate}
+                        className="btn-3d-primary px-3 py-1.5 text-xs font-bold"
+                      >
+                        + Tambah Tanggal
+                      </button>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {customDates.map((dt) => {
+                        const isSelectedDate = selectedCustomDateTab === dt;
+                        const countForDate = (
+                          customDateAssignments[dt] ||
+                          dailyMembers ||
+                          []
+                        ).length;
+                        return (
+                          <div
+                            key={dt}
+                            className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-mono rounded-xl border-2 transition-colors ${
+                              isSelectedDate
+                                ? 'bg-sky-600 border-sky-700 text-white font-bold'
+                                : 'bg-white border-[#E7D5C0] text-stone-700'
+                            }`}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => setSelectedCustomDateTab(dt)}
+                              className="inline-flex items-center gap-1"
+                            >
+                              <Calendar className="w-3 h-3 shrink-0" />
+                              <span>
+                                {dt} ({countForDate})
+                              </span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveCustomDate(dt)}
+                              aria-label={`Hapus tanggal ${dt}`}
+                              className="hover:text-rose-300 ml-1"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Search Input for Member Checkboxes */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-stone-800 inline-flex items-center gap-1.5">
+                    <Users className="w-3.5 h-3.5 text-orange-500" />
+                    <span>
+                      {mode === 'mingguan'
+                        ? `2. Centang Petugas Hari ${DAY_NAMES_ID[selectedDayTab]}:`
+                        : mode === 'custom'
+                        ? `2. Centang Petugas Tanggal ${selectedCustomDateTab}:`
+                        : 'Centang Petugas yang Bertugas:'}
+                    </span>
+                  </span>
+                  <div className="relative w-full sm:w-56">
+                    <Search className="w-3.5 h-3.5 text-stone-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={modalMemberSearch}
+                      onChange={(e) => setModalMemberSearch(e.target.value)}
+                      placeholder="Cari nama / kelas..."
+                      className="w-full pl-8 pr-7 py-1.5 text-xs bg-white border border-[#E7D5C0] rounded-xl focus:outline-none focus:border-orange-400"
+                    />
+                    {modalMemberSearch && (
+                      <button
+                        type="button"
+                        onClick={() => setModalMemberSearch('')}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-700"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-56 overflow-y-auto p-1">
+                  {modalFilteredMembers.map((m) => {
+                    const isChecked =
+                      mode === 'mingguan'
+                        ? (weeklyAssignments[selectedDayTab] || []).includes(
+                            m.id
+                          )
+                        : mode === 'custom'
+                        ? (
+                            customDateAssignments[selectedCustomDateTab] ||
+                            dailyMembers ||
+                            []
+                          ).includes(m.id)
+                        : dailyMembers.includes(m.id);
+                    const orgLabel = getMemberOrgLabel(m);
+                    return (
+                      <label
+                        key={m.id}
+                        className={`flex items-center justify-between gap-2 text-xs p-2 rounded-xl border cursor-pointer transition-colors ${
+                          isChecked
+                            ? 'bg-orange-50 border-orange-400 font-bold text-stone-900'
+                            : 'bg-white border-[#E7D5C0] text-stone-700 hover:bg-white/80'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() =>
+                              mode === 'mingguan'
+                                ? toggleWeeklyDayMember(selectedDayTab, m.id)
+                                : mode === 'custom'
+                                ? toggleCustomDateMember(
+                                    selectedCustomDateTab,
+                                    m.id
+                                  )
+                                : toggleDailyMember(m.id)
+                            }
+                            className="rounded border-stone-300 text-orange-500 shrink-0"
+                          />
+                          <span className="truncate">{m.name}</span>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <span
+                            className={`text-[9px] font-extrabold px-1 rounded ${
+                              orgLabel === 'OSIS'
+                                ? 'bg-orange-100 text-orange-800'
+                                : 'bg-indigo-100 text-indigo-800'
+                            }`}
+                          >
+                            {orgLabel}
+                          </span>
+                          <span className="text-[10px] font-mono font-bold text-sky-700">
+                            {m.kelas}
+                          </span>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
               </div>
 
               <div className="flex items-center justify-end gap-2 pt-3 border-t-2 border-[#F3E3D0]">

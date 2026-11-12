@@ -9,19 +9,35 @@ import {
   UserCheck,
   Plus,
   Users,
+  Download,
+  CheckCircle2,
+  CalendarOff,
+  Tag,
+  Trash2,
 } from 'lucide-react';
 import {
+  DAY_ATTENDANCE_NOTE_PRESETS,
+  DAY_NOTE_SCHEDULE_ID,
+  MEMBER_ATTENDANCE_NOTE_PRESETS,
+  STATUS_LABELS_ID,
   addDays,
+  calculateShiftCheckInProgress,
+  findCurrentActiveShift,
+  formatActiveDaysLabel,
   formatFullDateId,
   formatWeekCycleLabel,
+  getDayAttendanceNote,
   getWeekOfMonth,
-  STATUS_LABELS_ID,
   type AttendanceRecord,
   type AttendanceStatus,
   type OsisMember,
   type PiketSchedule,
   type ResolvedScheduleForDate,
 } from '../utils/piketLogic';
+import {
+  generateDailyAttendancePdfBytes,
+  triggerPdfDownload,
+} from '../utils/pdfExporter';
 import { CharacterAvatar3D } from './CharacterAvatar3D';
 import { mascotHeroImg, banner3dImg } from '../assets/brandAssets';
 
@@ -35,6 +51,7 @@ interface LiveDisplayAndAttendanceProps {
   nextDaySchedules: ResolvedScheduleForDate[];
   allSchedules: PiketSchedule[];
   members: OsisMember[];
+  attendanceRecords: AttendanceRecord[];
   onRecordAttendance: (
     date: string,
     scheduleId: string,
@@ -43,6 +60,14 @@ interface LiveDisplayAndAttendanceProps {
     note?: string
   ) => void;
   onMarkAllPresent: (date: string, scheduleId: string) => void;
+  onSaveDayOrShiftNote: (
+    date: string,
+    note: string,
+    isHoliday: boolean,
+    applyToAllMembers: boolean,
+    targetScheduleId?: string
+  ) => void;
+  onClearDayOrShiftNote: (date: string, targetScheduleId?: string) => void;
   onOpenSwapModal: (
     date: string,
     scheduleId: string,
@@ -69,8 +94,11 @@ export const LiveDisplayAndAttendance: React.FC<
   todaySchedules,
   nextDaySchedules,
   members,
+  attendanceRecords,
   onRecordAttendance,
   onMarkAllPresent,
+  onSaveDayOrShiftNote,
+  onClearDayOrShiftNote,
   onOpenSwapModal,
   onOpenNewScheduleModal,
   onOpenMembersTab,
@@ -79,7 +107,28 @@ export const LiveDisplayAndAttendance: React.FC<
   const [scheduleFilter, setScheduleFilter] = useState<string>('all');
   const [editingNoteKey, setEditingNoteKey] = useState<string | null>(null);
   const [noteDraft, setNoteDraft] = useState<string>('');
+  const [noteStatusDraft, setNoteStatusDraft] =
+    useState<AttendanceStatus>('izin');
   const [checkedTasks, setCheckedTasks] = useState<Record<string, boolean>>({});
+  const [pdfFeedback, setPdfFeedback] = useState<string | null>(null);
+
+  // Day-level Keterangan / Libur state
+  const currentDayNote = getDayAttendanceNote(
+    selectedDate,
+    attendanceRecords,
+    DAY_NOTE_SCHEDULE_ID
+  );
+  const [isDayNoteEditorOpen, setIsDayNoteEditorOpen] =
+    useState<boolean>(false);
+  const [dayNoteText, setDayNoteText] = useState<string>('');
+  const [dayNoteIsHoliday, setDayNoteIsHoliday] = useState<boolean>(true);
+
+  // Per-Shift bulk Keterangan / Libur state
+  const [shiftNoteOpenForId, setShiftNoteOpenForId] = useState<string | null>(
+    null
+  );
+  const [shiftNoteText, setShiftNoteText] = useState<string>('');
+  const [shiftNoteIsHoliday, setShiftNoteIsHoliday] = useState<boolean>(true);
 
   useEffect(() => {
     const updateClock = () => {
@@ -99,53 +148,71 @@ export const LiveDisplayAndAttendance: React.FC<
       ? todaySchedules
       : todaySchedules.filter((s) => s.schedule.id === scheduleFilter);
 
-  // Calculate today's KPI counts
-  let totalOfficersToday = 0;
-  let countHadir = 0;
-  let countTerlambat = 0;
-  let countIzinSakit = 0;
-  let countTidakPiket = 0;
-  let countBelumAbsen = 0;
+  // Calculate today's overall KPI counts
+  const allDutyMembersToday = todaySchedules.flatMap((s) => s.dutyMembers);
+  const overallProgress = calculateShiftCheckInProgress(allDutyMembersToday);
+  const totalOfficersToday = overallProgress.totalMembers;
+  const countHadir = overallProgress.hadirCount;
+  const countTerlambat = overallProgress.terlambatCount;
+  const countIzinSakit = overallProgress.excusedCount;
+  const countTidakPiket = overallProgress.absentCount;
+  const countBelumAbsen = overallProgress.pendingCount;
+  const attendancePercentage = overallProgress.checkedInPercentage;
 
-  for (const sch of todaySchedules) {
-    for (const dm of sch.dutyMembers) {
-      totalOfficersToday += 1;
-      if (dm.effectiveStatus === 'hadir') countHadir += 1;
-      else if (dm.effectiveStatus === 'terlambat') countTerlambat += 1;
-      else if (dm.effectiveStatus === 'izin' || dm.effectiveStatus === 'sakit')
-        countIzinSakit += 1;
-      else if (dm.effectiveStatus === 'tidak_piket') countTidakPiket += 1;
-      else countBelumAbsen += 1;
-    }
-  }
+  // Determine the current active shift (either by filter or by current time window)
+  const { activeShift, isLiveInTimeWindow } = findCurrentActiveShift(
+    todaySchedules,
+    currentTime,
+    scheduleFilter
+  );
+  const activeShiftProgress = calculateShiftCheckInProgress(
+    activeShift ? activeShift.dutyMembers : []
+  );
 
-  const attendancePercentage =
-    totalOfficersToday > 0
-      ? Math.round(((countHadir + countTerlambat) / totalOfficersToday) * 100)
-      : 0;
+  const handleExportPdf = (targetSchedules = filteredTodaySchedules) => {
+    const pdfBytes = generateDailyAttendancePdfBytes(
+      selectedDate,
+      targetSchedules,
+      currentTime,
+      currentDayNote
+    );
+    const suffix = scheduleFilter === 'all' ? 'semua-shift' : scheduleFilter;
+    const filename = `presensi-piket-osis-${selectedDate}-${suffix}.pdf`;
+    triggerPdfDownload(pdfBytes, filename);
+    setPdfFeedback(`Laporan PDF (${filename}) berhasil diunduh.`);
+    setTimeout(() => {
+      setPdfFeedback(null);
+    }, 4000);
+  };
+
+  const handleOpenDayNoteEditor = () => {
+    setDayNoteText(currentDayNote?.note || 'Libur Nasional / Tanggal Merah');
+    setDayNoteIsHoliday(
+      currentDayNote ? currentDayNote.isHoliday : true
+    );
+    setIsDayNoteEditorOpen(true);
+  };
 
   const handleStartEditNote = (
     scheduleId: string,
     memberId: string,
-    existingRecord: AttendanceRecord | null
+    existingRecord: AttendanceRecord | null,
+    currentEffectiveStatus: AttendanceStatus
   ) => {
     const key = `${scheduleId}:${memberId}`;
     setEditingNoteKey(key);
     setNoteDraft(existingRecord?.note || '');
+    setNoteStatusDraft(
+      currentEffectiveStatus === 'belum_absen' ? 'izin' : currentEffectiveStatus
+    );
   };
 
-  const handleSaveNote = (
-    scheduleId: string,
-    memberId: string,
-    currentStatus: AttendanceStatus
-  ) => {
-    const statusToSave: AttendanceStatus =
-      currentStatus === 'belum_absen' ? 'hadir' : currentStatus;
+  const handleSaveNote = (scheduleId: string, memberId: string) => {
     onRecordAttendance(
       selectedDate,
       scheduleId,
       memberId,
-      statusToSave,
+      noteStatusDraft,
       noteDraft.trim()
     );
     setEditingNoteKey(null);
@@ -188,12 +255,12 @@ export const LiveDisplayAndAttendance: React.FC<
                 </span>
               </div>
               <h1 className="text-2xl md:text-3xl font-bold tracking-tight text-stone-900">
-                Input Presensi Kehadiran Petugas Piket
+                Input Presensi & Keterangan Daftar Hadir
               </h1>
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2.5 sm:gap-3">
             {/* Live Digital Clock */}
             <div
               className="flex items-center gap-2.5 px-4 py-2 bg-stone-900 text-amber-50 rounded-2xl border-2 border-stone-700 shadow-[0_4px_0_0_#1C1917]"
@@ -264,8 +331,236 @@ export const LiveDisplayAndAttendance: React.FC<
               }}
               className="px-3 py-2 text-xs font-mono font-semibold tabular-nums bg-white border-2 border-[#EBD5B8] rounded-2xl text-stone-800 shadow-[0_3px_0_0_#DEC09A] focus:outline-none focus:border-orange-400"
             />
+
+            {/* Add / Edit Keterangan Hari / Libur Button */}
+            <button
+              type="button"
+              data-testid="btn-open-day-note"
+              onClick={handleOpenDayNoteEditor}
+              className="btn-3d-secondary inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold whitespace-nowrap shrink-0"
+            >
+              <CalendarOff className="w-3.5 h-3.5 text-rose-600" />
+              <span>
+                {currentDayNote
+                  ? 'Ubah Keterangan Hari / Libur'
+                  : '+ Set Libur / Keterangan Hari'}
+              </span>
+            </button>
+
+            {/* Export to PDF Button */}
+            <button
+              type="button"
+              data-testid="btn-export-attendance-pdf"
+              onClick={() => handleExportPdf(filteredTodaySchedules)}
+              className="btn-3d-primary inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold whitespace-nowrap shrink-0"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Export PDF</span>
+            </button>
           </div>
         </div>
+
+        {/* Active Day-Level Keterangan / Status Libur Banner */}
+        {currentDayNote && !isDayNoteEditorOpen && (
+          <div
+            data-testid="active-day-note-banner"
+            className={`mt-4 p-4 rounded-2xl border-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+              currentDayNote.isHoliday
+                ? 'bg-rose-50/90 border-rose-300 text-rose-950'
+                : 'bg-amber-50/90 border-amber-300 text-amber-950'
+            }`}
+          >
+            <div className="flex items-start sm:items-center gap-3">
+              <div
+                className={`px-2.5 py-1 rounded-xl text-[11px] font-extrabold shrink-0 ${
+                  currentDayNote.isHoliday
+                    ? 'bg-rose-600 text-white'
+                    : 'bg-amber-500 text-white'
+                }`}
+              >
+                {currentDayNote.isHoliday
+                  ? 'STATUS HARI LIBUR'
+                  : 'KETERANGAN DAFTAR HADIR'}
+              </div>
+              <div>
+                <p className="text-sm font-bold">{currentDayNote.note}</p>
+                <p className="text-[11px] opacity-75">
+                  Dicatat oleh {currentDayNote.recordedBy} · Ditampilkan pada
+                  layar Display Publik & Laporan PDF
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={handleOpenDayNoteEditor}
+                className="px-3 py-1.5 text-xs font-bold bg-white border border-stone-300 rounded-xl text-stone-800 hover:bg-stone-50"
+              >
+                Edit Keterangan
+              </button>
+              <button
+                type="button"
+                data-testid="btn-clear-day-note"
+                onClick={() =>
+                  onClearDayOrShiftNote(selectedDate, DAY_NOTE_SCHEDULE_ID)
+                }
+                className="px-3 py-1.5 text-xs font-bold bg-white border border-rose-200 rounded-xl text-rose-700 hover:bg-rose-50 inline-flex items-center gap-1"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Hapus</span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Day-Level Keterangan / Status Libur Editor Box */}
+        {isDayNoteEditorOpen && (
+          <div
+            data-testid="day-note-editor-panel"
+            className="mt-4 p-4 sm:p-5 rounded-2xl bg-[#FFF6E8] border-2 border-[#EBD5B8] space-y-3.5"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <span className="text-xs font-bold text-orange-600">
+                  Pengaturan Keterangan Daftar Hadir & Status Libur
+                </span>
+                <h2 className="text-base font-bold text-stone-900">
+                  Tambah Keterangan pada {formatFullDateId(selectedDate)}
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsDayNoteEditorOpen(false)}
+                className="text-xs font-bold text-stone-500 hover:text-stone-800"
+              >
+                Tutup
+              </button>
+            </div>
+
+            {/* Quick Preset Chips */}
+            <div className="space-y-1.5">
+              <span className="block text-xs font-bold text-stone-700">
+                1. Pilih Cepat Keterangan (Klik salah satu atau ketik sendiri di
+                bawah):
+              </span>
+              <div className="flex flex-wrap gap-1.5">
+                {DAY_ATTENDANCE_NOTE_PRESETS.map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => {
+                      setDayNoteText(preset);
+                      setDayNoteIsHoliday(
+                        preset.toLowerCase().includes('libur')
+                      );
+                    }}
+                    className={`px-3 py-1.5 text-xs font-bold rounded-xl border transition-colors ${
+                      dayNoteText === preset
+                        ? 'bg-orange-500 border-orange-600 text-white'
+                        : 'bg-white border-[#E7D5C0] text-stone-700 hover:bg-orange-50'
+                    }`}
+                  >
+                    {preset}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Custom Text Input + Holiday Checkbox */}
+            <div className="space-y-2">
+              <label
+                htmlFor="day-note-custom-input"
+                className="block text-xs font-bold text-stone-700"
+              >
+                2. Tulis Keterangan Daftar Hadir (Misal: Libur, Classmeeting,
+                Ujian, Rapat, dll):
+              </label>
+              <input
+                id="day-note-custom-input"
+                data-testid="input-day-note-text"
+                type="text"
+                value={dayNoteText}
+                onChange={(e) => setDayNoteText(e.target.value)}
+                placeholder="Contoh: Libur Tanggal Merah / Sedang Ujian Tengah Semester / Kegiatan OSIS..."
+                className="w-full px-3.5 py-2 text-xs sm:text-sm font-medium bg-white border-2 border-[#E7D5C0] rounded-xl text-stone-900 focus:outline-none focus:border-orange-400"
+              />
+
+              <label className="inline-flex items-center gap-2 text-xs font-bold text-stone-800 cursor-pointer pt-1">
+                <input
+                  type="checkbox"
+                  checked={dayNoteIsHoliday}
+                  onChange={(e) => setDayNoteIsHoliday(e.target.checked)}
+                  className="rounded border-stone-300 text-rose-600 focus:ring-rose-500"
+                />
+                <span>
+                  Tandai tanggal ini sebagai <strong>Hari Libur Piket</strong>{' '}
+                  (Ditampilkan dengan label merah STATUS HARI LIBUR)
+                </span>
+              </label>
+            </div>
+
+            {/* Save Actions */}
+            <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-[#EBD5B8]">
+              <button
+                type="button"
+                onClick={() => setIsDayNoteEditorOpen(false)}
+                className="btn-3d-secondary px-3.5 py-2 text-xs font-bold"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                data-testid="btn-save-day-note-only"
+                onClick={() => {
+                  if (!dayNoteText.trim()) return;
+                  onSaveDayOrShiftNote(
+                    selectedDate,
+                    dayNoteText.trim(),
+                    dayNoteIsHoliday,
+                    false,
+                    DAY_NOTE_SCHEDULE_ID
+                  );
+                  setIsDayNoteEditorOpen(false);
+                }}
+                className="btn-3d-sky px-3.5 py-2 text-xs font-bold"
+              >
+                Simpan Banner Keterangan Saja
+              </button>
+              <button
+                type="button"
+                data-testid="btn-save-day-note-and-apply-all"
+                onClick={() => {
+                  if (!dayNoteText.trim()) return;
+                  onSaveDayOrShiftNote(
+                    selectedDate,
+                    dayNoteText.trim(),
+                    dayNoteIsHoliday,
+                    true,
+                    DAY_NOTE_SCHEDULE_ID
+                  );
+                  setIsDayNoteEditorOpen(false);
+                }}
+                className="btn-3d-primary px-4 py-2 text-xs font-bold"
+              >
+                Simpan & Terapkan ke Semua Petugas Hari Ini
+              </button>
+            </div>
+          </div>
+        )}
+
+        {pdfFeedback && (
+          <div
+            role="status"
+            data-testid="pdf-export-feedback"
+            className="mt-4 px-4 py-2.5 rounded-xl bg-emerald-50 border-2 border-emerald-300 text-xs font-bold text-emerald-800 flex items-center justify-between gap-2"
+          >
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span>{pdfFeedback}</span>
+            </div>
+          </div>
+        )}
 
         {/* 4-Column Full-Width KPI Summary Strip */}
         <div className="grid grid-cols-2 lg:grid-cols-4 divide-y sm:divide-y-0 sm:divide-x-2 divide-[#F3E3D0] pt-5">
@@ -299,7 +594,7 @@ export const LiveDisplayAndAttendance: React.FC<
 
           <div className="py-2 sm:py-1 sm:px-5">
             <p className="text-xs font-semibold text-stone-500">
-              Izin & Sakit Terkonfirmasi
+              Izin, Sakit & Keterangan Libur
             </p>
             <div className="mt-1.5 flex items-baseline justify-between gap-2">
               <span className="text-2xl font-bold font-mono tabular-nums text-amber-700">
@@ -327,6 +622,122 @@ export const LiveDisplayAndAttendance: React.FC<
             </div>
           </div>
         </div>
+
+        {/* Active Shift Check-In Progress Bar Indicator */}
+        {activeShift && (
+          <div
+            data-testid="active-shift-progress-banner"
+            className="mt-5 pt-4 border-t-2 border-[#F3E3D0]"
+          >
+            <div className="p-4 rounded-2xl bg-[#FFF9EE] border-2 border-[#F3DEC0] space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="space-y-0.5">
+                  <div className="flex flex-wrap items-center gap-2 text-xs font-bold">
+                    <span className="text-orange-600">
+                      {isLiveInTimeWindow
+                        ? 'Shift Aktif Saat Ini'
+                        : 'Indikator Check-In Shift Aktif'}
+                    </span>
+                    <span aria-hidden="true" className="text-stone-300">
+                      ·
+                    </span>
+                    <span className="font-mono text-stone-700 tabular-nums">
+                      {activeShift.schedule.startTime} –{' '}
+                      {activeShift.schedule.endTime} WIB
+                    </span>
+                    <span aria-hidden="true" className="text-stone-300">
+                      ·
+                    </span>
+                    <span className="text-stone-600">
+                      {activeShift.schedule.location}
+                    </span>
+                  </div>
+                  <h2 className="text-base sm:text-lg font-bold text-stone-900">
+                    {activeShift.schedule.title}
+                  </h2>
+                </div>
+
+                <div className="flex items-center gap-3 shrink-0">
+                  <div className="text-right">
+                    <span
+                      data-testid="active-shift-checkin-count"
+                      className="text-sm sm:text-base font-mono font-bold tabular-nums text-emerald-700"
+                    >
+                      {activeShiftProgress.checkedInCount} /{' '}
+                      {activeShiftProgress.totalMembers} Petugas Check-In
+                    </span>
+                    <span className="ml-2 text-xs font-mono font-bold tabular-nums text-stone-700">
+                      ({activeShiftProgress.checkedInPercentage}%)
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Progress Bar Track */}
+              <div
+                role="progressbar"
+                aria-label={`Progress Check-In ${activeShift.schedule.title}`}
+                aria-valuenow={activeShiftProgress.checkedInPercentage}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                className="w-full h-3.5 bg-stone-200/90 rounded-full overflow-hidden border border-stone-300 flex"
+              >
+                <div
+                  style={{
+                    width: `${activeShiftProgress.checkedInPercentage}%`,
+                  }}
+                  className="h-full bg-emerald-500 transition-all duration-300"
+                  title={`Sudah Check-In: ${activeShiftProgress.checkedInCount} petugas (${activeShiftProgress.checkedInPercentage}%)`}
+                />
+                {activeShiftProgress.excusedPercentage > 0 && (
+                  <div
+                    style={{
+                      width: `${activeShiftProgress.excusedPercentage}%`,
+                    }}
+                    className="h-full bg-amber-400 transition-all duration-300"
+                    title={`Izin/Sakit: ${activeShiftProgress.excusedCount} petugas`}
+                  />
+                )}
+                {activeShiftProgress.absentPercentage > 0 && (
+                  <div
+                    style={{
+                      width: `${activeShiftProgress.absentPercentage}%`,
+                    }}
+                    className="h-full bg-rose-500 transition-all duration-300"
+                    title={`Tidak Piket: ${activeShiftProgress.absentCount} petugas`}
+                  />
+                )}
+              </div>
+
+              {/* Breakdown Legend & Overall Daily Progress */}
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-stone-600">
+                <div className="flex flex-wrap items-center gap-2 font-medium">
+                  <span className="text-emerald-700 font-bold">
+                    Hadir: {activeShiftProgress.hadirCount}
+                  </span>
+                  <span aria-hidden="true">·</span>
+                  <span className="text-sky-700 font-bold">
+                    Terlambat: {activeShiftProgress.terlambatCount}
+                  </span>
+                  <span aria-hidden="true">·</span>
+                  <span className="text-amber-700 font-bold">
+                    Izin/Sakit/Ket: {activeShiftProgress.excusedCount}
+                  </span>
+                  <span aria-hidden="true">·</span>
+                  <span className="text-stone-500">
+                    Belum Absen: {activeShiftProgress.pendingCount}
+                  </span>
+                </div>
+
+                <span className="font-mono text-stone-600 tabular-nums">
+                  Total Semua Shift Hari Ini: {overallProgress.checkedInCount}/
+                  {overallProgress.totalMembers} check-in (
+                  {overallProgress.checkedInPercentage}%)
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
       </section>
 
       {/* Main Side-by-Side Split Layout */}
@@ -378,7 +789,7 @@ export const LiveDisplayAndAttendance: React.FC<
                 className="btn-3d-primary inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-bold whitespace-nowrap shrink-0"
               >
                 <Plus className="w-3.5 h-3.5" />
-                <span>Tambah Jadwal Baru</span>
+                <span>Kelola / Custom Jadwal</span>
               </button>
             </div>
           </div>
@@ -400,17 +811,19 @@ export const LiveDisplayAndAttendance: React.FC<
                 <p className="text-sm text-stone-600">
                   {members.length === 0
                     ? 'Database siap digunakan! Mulailah dengan menambahkan anggota pengurus OSIS dan membuat jadwal piket.'
-                    : `Belum ada jadwal harian, mingguan, atau tanggal custom yang berjalan pada ${formatFullDateId(selectedDate)}.`}
+                    : `Belum ada jadwal harian, mingguan, atau tanggal custom yang berjalan pada ${formatFullDateId(
+                        selectedDate
+                      )}.`}
                 </p>
               </div>
               <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
                 <button
                   type="button"
-                  onClick={onOpenMembersTab}
+                  onClick={handleOpenDayNoteEditor}
                   className="btn-3d-secondary inline-flex items-center gap-2 px-4 py-2.5 text-xs font-bold"
                 >
-                  <Users className="w-4 h-4" />
-                  <span>1. Kelola Anggota Piket</span>
+                  <CalendarOff className="w-4 h-4 text-rose-600" />
+                  <span>Set Keterangan Libur / Kegiatan</span>
                 </button>
                 <button
                   type="button"
@@ -418,72 +831,239 @@ export const LiveDisplayAndAttendance: React.FC<
                   className="btn-3d-primary inline-flex items-center gap-2 px-4 py-2.5 text-xs font-bold"
                 >
                   <Plus className="w-4 h-4" />
-                  <span>2. Buat Jadwal Piket</span>
+                  <span>Atur Custom Hari Jadwal</span>
                 </button>
               </div>
             </div>
           ) : (
             filteredTodaySchedules.map((resolved) => {
               const { schedule, dutyMembers } = resolved;
-              const presentInSchedule = dutyMembers.filter(
-                (m) =>
-                  m.effectiveStatus === 'hadir' ||
-                  m.effectiveStatus === 'terlambat'
-              ).length;
+              const shiftProgress = calculateShiftCheckInProgress(dutyMembers);
+              const presentInSchedule = shiftProgress.checkedInCount;
+              const shiftNoteInfo = getDayAttendanceNote(
+                selectedDate,
+                attendanceRecords,
+                schedule.id
+              );
+              const isShiftNoteOpen = shiftNoteOpenForId === schedule.id;
 
               return (
-                <article
-                  key={schedule.id}
-                  className="card-3d overflow-hidden"
-                >
+                <article key={schedule.id} className="card-3d overflow-hidden">
                   {/* Schedule Header */}
-                  <div className="p-5 bg-[#FFFDF8] border-b-2 border-[#F3E3D0] flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
-                    <div className="space-y-1.5">
-                      <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-stone-600">
-                        <span className="font-mono font-bold text-orange-600 tabular-nums">
-                          {schedule.startTime} – {schedule.endTime} WIB
-                        </span>
-                        <span aria-hidden="true">·</span>
-                        <span>{MODE_LABELS[schedule.mode]}</span>
-                        <span aria-hidden="true">·</span>
-                        <span className="font-bold text-sky-700">
-                          {formatWeekCycleLabel(schedule.activeWeeks)}
-                        </span>
-                        <span aria-hidden="true">·</span>
-                        <span className="inline-flex items-center gap-1 text-stone-600">
-                          <MapPin className="w-3.5 h-3.5 text-orange-500" />
-                          {schedule.location}
-                        </span>
+                  <div className="p-5 bg-[#FFFDF8] border-b-2 border-[#F3E3D0] space-y-3.5">
+                    <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+                      <div className="space-y-1.5">
+                        <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-stone-600">
+                          <span className="font-mono font-bold text-orange-600 tabular-nums">
+                            {schedule.startTime} – {schedule.endTime} WIB
+                          </span>
+                          <span aria-hidden="true">·</span>
+                          <span>{MODE_LABELS[schedule.mode]}</span>
+                          <span aria-hidden="true">·</span>
+                          <span className="font-bold text-sky-700">
+                            {formatWeekCycleLabel(schedule.activeWeeks)}
+                          </span>
+                          {schedule.mode !== 'custom' && (
+                            <>
+                              <span aria-hidden="true">·</span>
+                              <span className="text-stone-500">
+                                {formatActiveDaysLabel(schedule.activeDays)}
+                              </span>
+                            </>
+                          )}
+                          <span aria-hidden="true">·</span>
+                          <span className="inline-flex items-center gap-1 text-stone-600">
+                            <MapPin className="w-3.5 h-3.5 text-orange-500" />
+                            {schedule.location}
+                          </span>
+                        </div>
+                        <h2 className="text-xl font-bold text-stone-900">
+                          {schedule.title}
+                        </h2>
+                        <p className="text-sm text-stone-600">
+                          {schedule.description}
+                        </p>
                       </div>
-                      <h2 className="text-xl font-bold text-stone-900">
-                        {schedule.title}
-                      </h2>
-                      <p className="text-sm text-stone-600">
-                        {schedule.description}
-                      </p>
+
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          data-testid={`btn-shift-note-${schedule.id}`}
+                          onClick={() => {
+                            if (isShiftNoteOpen) {
+                              setShiftNoteOpenForId(null);
+                            } else {
+                              setShiftNoteText(
+                                shiftNoteInfo?.note || 'Libur / Bebas Piket Pos'
+                              );
+                              setShiftNoteIsHoliday(
+                                shiftNoteInfo ? shiftNoteInfo.isHoliday : true
+                              );
+                              setShiftNoteOpenForId(schedule.id);
+                            }
+                          }}
+                          className="btn-3d-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold whitespace-nowrap shrink-0"
+                        >
+                          <Tag className="w-3.5 h-3.5 text-orange-500" />
+                          <span>+ Keterangan Pos / Libur</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onOpenSwapModal(selectedDate, schedule.id)
+                          }
+                          className="btn-3d-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold whitespace-nowrap shrink-0"
+                        >
+                          <ArrowLeftRight className="w-3.5 h-3.5" />
+                          <span>Tukar Petugas</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onMarkAllPresent(selectedDate, schedule.id)
+                          }
+                          className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-bold text-emerald-900 bg-emerald-100 hover:bg-emerald-200 border-2 border-emerald-400 rounded-xl shadow-[0_3px_0_0_#34D399] transition-colors whitespace-nowrap shrink-0"
+                        >
+                          <UserCheck className="w-3.5 h-3.5" />
+                          <span>Semua Hadir</span>
+                        </button>
+                      </div>
                     </div>
 
-                    <div className="flex flex-wrap items-center gap-2 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          onOpenSwapModal(selectedDate, schedule.id)
-                        }
-                        className="btn-3d-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold whitespace-nowrap shrink-0"
+                    {/* Per-Shift Active Note Banner (if set) */}
+                    {shiftNoteInfo && !isShiftNoteOpen && (
+                      <div className="px-3.5 py-2.5 rounded-xl bg-amber-50 border border-amber-300 flex items-center justify-between gap-2 text-xs">
+                        <div className="flex items-center gap-2 font-bold text-amber-950">
+                          <span className="px-2 py-0.5 rounded bg-amber-500 text-white text-[10px]">
+                            {shiftNoteInfo.isHoliday ? 'POS LIBUR' : 'INFO POS'}
+                          </span>
+                          <span>{shiftNoteInfo.note}</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onClearDayOrShiftNote(selectedDate, schedule.id)
+                          }
+                          className="text-rose-600 hover:underline font-bold text-[11px]"
+                        >
+                          Hapus
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Per-Shift Keterangan / Libur Inline Editor */}
+                    {isShiftNoteOpen && (
+                      <div className="p-3.5 rounded-2xl bg-[#FFF6E8] border-2 border-[#EBD5B8] space-y-2.5">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-bold text-stone-800">
+                            Keterangan Khusus untuk Pos{' '}
+                            <strong className="text-orange-700">
+                              {schedule.title}
+                            </strong>
+                            :
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setShiftNoteOpenForId(null)}
+                            className="text-xs text-stone-500 hover:text-stone-800 font-bold"
+                          >
+                            Batal
+                          </button>
+                        </div>
+
+                        <div className="flex flex-wrap gap-1.5">
+                          {DAY_ATTENDANCE_NOTE_PRESETS.map((preset) => (
+                            <button
+                              key={preset}
+                              type="button"
+                              onClick={() => setShiftNoteText(preset)}
+                              className={`px-2.5 py-1 text-[11px] font-bold rounded-lg border ${
+                                shiftNoteText === preset
+                                  ? 'bg-orange-500 border-orange-600 text-white'
+                                  : 'bg-white border-[#E7D5C0] text-stone-700 hover:bg-orange-50'
+                              }`}
+                            >
+                              {preset}
+                            </button>
+                          ))}
+                        </div>
+
+                        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                          <input
+                            type="text"
+                            value={shiftNoteText}
+                            onChange={(e) => setShiftNoteText(e.target.value)}
+                            placeholder="Ketik keterangan pos (contoh: Libur Piket, Ujian, Hujan Deras)..."
+                            className="flex-1 px-3 py-1.5 text-xs bg-white border-2 border-[#E7D5C0] rounded-xl focus:outline-none focus:border-orange-400"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!shiftNoteText.trim()) return;
+                              onSaveDayOrShiftNote(
+                                selectedDate,
+                                shiftNoteText.trim(),
+                                shiftNoteIsHoliday,
+                                true,
+                                schedule.id
+                              );
+                              setShiftNoteOpenForId(null);
+                            }}
+                            className="btn-3d-primary px-3.5 py-1.5 text-xs font-bold whitespace-nowrap"
+                          >
+                            Simpan & Terapkan ke Petugas Pos Ini
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Per-Shift Check-In Progress Bar */}
+                    <div
+                      data-testid={`shift-progress-${schedule.id}`}
+                      className="pt-2.5 border-t border-[#F3E3D0] space-y-1.5"
+                    >
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-bold text-stone-700">
+                          Progress Check-In Shift:
+                        </span>
+                        <span className="font-mono font-bold tabular-nums text-emerald-700">
+                          {presentInSchedule} / {dutyMembers.length} petugas
+                          check-in ({shiftProgress.checkedInPercentage}%)
+                        </span>
+                      </div>
+                      <div
+                        role="progressbar"
+                        aria-label={`Progress Check-In Shift ${schedule.title}`}
+                        aria-valuenow={shiftProgress.checkedInPercentage}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        className="w-full h-2.5 bg-stone-200/90 rounded-full overflow-hidden border border-stone-300 flex"
                       >
-                        <ArrowLeftRight className="w-3.5 h-3.5" />
-                        <span>Ganti / Tukar Petugas</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          onMarkAllPresent(selectedDate, schedule.id)
-                        }
-                        className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-bold text-emerald-900 bg-emerald-100 hover:bg-emerald-200 border-2 border-emerald-400 rounded-xl shadow-[0_3px_0_0_#34D399] transition-colors whitespace-nowrap shrink-0"
-                      >
-                        <UserCheck className="w-3.5 h-3.5" />
-                        <span>Semua Hadir</span>
-                      </button>
+                        <div
+                          style={{
+                            width: `${shiftProgress.checkedInPercentage}%`,
+                          }}
+                          className="h-full bg-emerald-500 transition-all duration-300"
+                        />
+                        {shiftProgress.excusedPercentage > 0 && (
+                          <div
+                            style={{
+                              width: `${shiftProgress.excusedPercentage}%`,
+                            }}
+                            className="h-full bg-amber-400 transition-all duration-300"
+                          />
+                        )}
+                        {shiftProgress.absentPercentage > 0 && (
+                          <div
+                            style={{
+                              width: `${shiftProgress.absentPercentage}%`,
+                            }}
+                            className="h-full bg-rose-500 transition-all duration-300"
+                          />
+                        )}
+                      </div>
                     </div>
                   </div>
 
@@ -570,18 +1150,15 @@ export const LiveDisplayAndAttendance: React.FC<
                                   )}
 
                                   {dm.attendance?.note && (
-                                    <>
-                                      <span aria-hidden="true">·</span>
-                                      <span className="italic text-stone-600">
-                                        &ldquo;{dm.attendance.note}&rdquo;
-                                      </span>
-                                    </>
+                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-100/90 border border-amber-300 text-amber-900 font-bold text-[11px]">
+                                      <span>Ket: {dm.attendance.note}</span>
+                                    </span>
                                   )}
                                 </div>
                               </div>
                             </div>
 
-                            {/* Interactive Attendance Status Buttons */}
+                            {/* Interactive Attendance Status Buttons + Labeled Keterangan Button */}
                             <div className="flex flex-wrap items-center gap-1.5 shrink-0">
                               <button
                                 type="button"
@@ -690,53 +1267,128 @@ export const LiveDisplayAndAttendance: React.FC<
 
                               <button
                                 type="button"
+                                data-testid={`btn-member-note-${schedule.id}-${dm.member.id}`}
                                 onClick={() =>
                                   handleStartEditNote(
                                     schedule.id,
                                     dm.member.id,
-                                    dm.attendance
+                                    dm.attendance,
+                                    dm.effectiveStatus
                                   )
                                 }
-                                aria-label={`Catatan untuk ${dm.member.name}`}
-                                title="Tambah/Ubah Catatan Keterangan"
-                                className="p-1.5 text-stone-600 hover:text-stone-900 bg-[#FFF5E6] border-2 border-[#E7D5C0] rounded-xl transition-colors"
+                                aria-label={`Keterangan untuk ${dm.member.name}`}
+                                title="Tambah/Ubah Keterangan (Misal: Libur, Dispensasi, Izin Lomba)"
+                                className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-bold rounded-xl border-2 transition-colors whitespace-nowrap shrink-0 ${
+                                  dm.attendance?.note
+                                    ? 'bg-amber-100 border-amber-400 text-amber-900'
+                                    : 'bg-[#FFF5E6] border-[#E7D5C0] text-stone-700 hover:text-stone-900 hover:bg-orange-50'
+                                }`}
                               >
-                                <FileText className="w-3.5 h-3.5" />
+                                <FileText className="w-3.5 h-3.5 text-orange-600" />
+                                <span>
+                                  {dm.attendance?.note
+                                    ? 'Ubah Ket.'
+                                    : '+ Keterangan'}
+                                </span>
                               </button>
                             </div>
                           </div>
 
-                          {/* Optional Inline Note Editor */}
+                          {/* Enhanced Inline Keterangan Editor with Quick Presets */}
                           {isEditingThisNote && (
-                            <div className="mt-3 pt-3 border-t border-[#F3E3D0] flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-                              <input
-                                type="text"
-                                value={noteDraft}
-                                onChange={(e) => setNoteDraft(e.target.value)}
-                                placeholder="Tulis keterangan absensi (contoh: Izin lomba cerdas cermat, Sudah menyapu ruang OSIS)..."
-                                className="flex-1 px-3 py-1.5 text-xs bg-white border-2 border-[#E7D5C0] rounded-xl focus:outline-none focus:border-orange-400"
-                              />
-                              <div className="flex items-center gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    handleSaveNote(
-                                      schedule.id,
-                                      dm.member.id,
-                                      dm.effectiveStatus
-                                    )
-                                  }
-                                  className="btn-3d-primary px-3 py-1.5 text-xs font-bold whitespace-nowrap"
-                                >
-                                  Simpan Catatan
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => setEditingNoteKey(null)}
-                                  className="btn-3d-secondary px-3 py-1.5 text-xs font-bold whitespace-nowrap"
-                                >
-                                  Batal
-                                </button>
+                            <div className="mt-3 pt-3 border-t border-[#F3E3D0] space-y-2.5 bg-[#FFF9F0] p-3 rounded-xl">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <span className="text-xs font-bold text-stone-800">
+                                  Pilih Cepat Keterangan untuk{' '}
+                                  <strong className="text-orange-700">
+                                    {dm.member.name}
+                                  </strong>
+                                  :
+                                </span>
+                                <div className="flex items-center gap-1.5 text-xs">
+                                  <span className="text-stone-500 font-semibold">
+                                    Status:
+                                  </span>
+                                  <select
+                                    aria-label="Pilih status untuk keterangan"
+                                    value={noteStatusDraft}
+                                    onChange={(e) =>
+                                      setNoteStatusDraft(
+                                        e.target.value as AttendanceStatus
+                                      )
+                                    }
+                                    className="px-2 py-1 text-xs font-bold bg-white border border-[#E7D5C0] rounded-lg text-stone-800"
+                                  >
+                                    <option value="izin">
+                                      Izin / Libur / Dispensasi
+                                    </option>
+                                    <option value="hadir">Piket / Hadir</option>
+                                    <option value="terlambat">Terlambat</option>
+                                    <option value="sakit">Sakit</option>
+                                    <option value="tidak_piket">
+                                      Tidak Piket (Alfa)
+                                    </option>
+                                  </select>
+                                </div>
+                              </div>
+
+                              {/* 1-Click Member Preset Chips */}
+                              <div className="flex flex-wrap gap-1.5">
+                                {MEMBER_ATTENDANCE_NOTE_PRESETS.map(
+                                  (preset) => (
+                                    <button
+                                      key={preset}
+                                      type="button"
+                                      onClick={() => {
+                                        setNoteDraft(preset);
+                                        if (
+                                          preset
+                                            .toLowerCase()
+                                            .includes('sakit')
+                                        ) {
+                                          setNoteStatusDraft('sakit');
+                                        } else {
+                                          setNoteStatusDraft('izin');
+                                        }
+                                      }}
+                                      className={`px-2.5 py-1 text-[11px] font-bold rounded-lg border transition-colors ${
+                                        noteDraft === preset
+                                          ? 'bg-orange-500 border-orange-600 text-white'
+                                          : 'bg-white border-[#E7D5C0] text-stone-700 hover:bg-orange-50'
+                                      }`}
+                                    >
+                                      {preset}
+                                    </button>
+                                  )
+                                )}
+                              </div>
+
+                              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                                <input
+                                  type="text"
+                                  value={noteDraft}
+                                  onChange={(e) => setNoteDraft(e.target.value)}
+                                  placeholder="Ketik keterangan bebas (contoh: Libur, Dispensasi lomba, Izin acara keluarga)..."
+                                  className="flex-1 px-3 py-1.5 text-xs bg-white border-2 border-[#E7D5C0] rounded-xl focus:outline-none focus:border-orange-400"
+                                />
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleSaveNote(schedule.id, dm.member.id)
+                                    }
+                                    className="btn-3d-primary px-3.5 py-1.5 text-xs font-bold whitespace-nowrap"
+                                  >
+                                    Simpan Keterangan
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditingNoteKey(null)}
+                                    className="btn-3d-secondary px-3 py-1.5 text-xs font-bold whitespace-nowrap"
+                                  >
+                                    Batal
+                                  </button>
+                                </div>
                               </div>
                             </div>
                           )}

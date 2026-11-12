@@ -6,10 +6,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Settings, ShieldCheck, LogOut, Lock } from 'lucide-react';
 import {
+  DAY_NOTE_MEMBER_ID,
+  DAY_NOTE_SCHEDULE_ID,
   PERMANENT_DEVELOPER_ACCOUNT,
   addDays,
   canDeleteAccount,
   canManageAdminAccounts,
+  createDayAttendanceNoteRecord,
   formatDateString,
   getDefaultDisplayDateForHour,
   replaceMemberInSchedule,
@@ -40,6 +43,7 @@ import {
   deleteSwapFromDb,
   saveAttendanceToDb,
   saveBatchAttendanceToDb,
+  deleteAttendanceFromDb,
   saveAccountToDb,
   deleteAccountFromDb,
   seedOfficialSchedulesToDb,
@@ -197,11 +201,12 @@ export default function App() {
     };
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      const key = e.key.toUpperCase();
-      const isCtrlOrCmd = e.ctrlKey || e.metaKey;
+      const rawKey = typeof e.key === 'string' ? e.key : '';
+      const key = rawKey.toUpperCase();
+      const isCtrlOrCmd = Boolean(e.ctrlKey || e.metaKey);
 
       // F12
-      if (e.key === 'F12') {
+      if (rawKey === 'F12' || key === 'F12') {
         e.preventDefault();
         e.stopPropagation();
         return;
@@ -577,6 +582,77 @@ export default function App() {
     );
   };
 
+  const handleSaveDayOrShiftNote = async (
+    date: string,
+    note: string,
+    isHoliday: boolean,
+    applyToAllMembers: boolean,
+    targetScheduleId: string = DAY_NOTE_SCHEDULE_ID
+  ) => {
+    const recorderName =
+      loggedInAccount?.displayName || 'Admin Pengurus OSIS';
+    const noteRecord = createDayAttendanceNoteRecord(
+      date,
+      note,
+      isHoliday,
+      recorderName,
+      targetScheduleId
+    );
+
+    const batchPayload: AttendanceRecord[] = [noteRecord];
+
+    if (applyToAllMembers) {
+      const targetSchedulesList =
+        targetScheduleId === DAY_NOTE_SCHEDULE_ID
+          ? schedules
+          : schedules.filter((s) => s.id === targetScheduleId);
+      const resolvedList = resolveSchedulesForDate(
+        date,
+        targetSchedulesList,
+        members,
+        swaps,
+        attendanceRecords
+      );
+      for (const res of resolvedList) {
+        for (const dm of res.dutyMembers) {
+          batchPayload.push({
+            id: `att-${date}-${res.schedule.id}-${dm.member.id}`,
+            date,
+            scheduleId: res.schedule.id,
+            memberId: dm.member.id,
+            status: 'izin',
+            checkInTime: '-',
+            note: note.trim(),
+            recordedBy: recorderName,
+          });
+        }
+      }
+    }
+
+    await saveBatchAttendanceToDb(batchPayload);
+    showToast(
+      applyToAllMembers
+        ? `Keterangan "${note}" disimpan & diterapkan ke seluruh petugas.`
+        : `Keterangan "${note}" berhasil disimpan ke daftar hadir.`
+    );
+  };
+
+  const handleClearDayOrShiftNote = async (
+    date: string,
+    targetScheduleId: string = DAY_NOTE_SCHEDULE_ID
+  ) => {
+    const existing = attendanceRecords.find(
+      (r) =>
+        r.date === date &&
+        r.scheduleId === targetScheduleId &&
+        r.memberId === DAY_NOTE_MEMBER_ID
+    );
+    if (existing) {
+      await deleteAttendanceFromDb(existing.id);
+      showToast('Keterangan daftar hadir berhasil dihapus.');
+    }
+  };
+
   const handleAddSchedule = async (newSchedule: PiketSchedule) => {
     await saveScheduleToDb(newSchedule, false);
     showToast(`Jadwal "${newSchedule.title}" berhasil disimpan ke database.`);
@@ -945,6 +1021,7 @@ export default function App() {
             nextDaySchedules={resolvedNextDaySchedules}
             allSchedules={schedules}
             members={members}
+            attendanceRecords={attendanceRecords}
           />
         )}
 
@@ -959,8 +1036,11 @@ export default function App() {
             nextDaySchedules={resolvedNextDaySchedules}
             allSchedules={schedules}
             members={members}
+            attendanceRecords={attendanceRecords}
             onRecordAttendance={handleRecordAttendance}
             onMarkAllPresent={handleMarkAllPresent}
+            onSaveDayOrShiftNote={handleSaveDayOrShiftNote}
+            onClearDayOrShiftNote={handleClearDayOrShiftNote}
             onOpenSwapModal={(date, scheduleId, originalMemberId) =>
               setSwapModalState({
                 isOpen: true,

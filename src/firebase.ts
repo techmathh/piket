@@ -296,6 +296,17 @@ export async function saveBatchAttendanceToDb(
   }
 }
 
+export async function deleteAttendanceFromDb(
+  attendanceId: string
+): Promise<void> {
+  const path = `attendance/${attendanceId}`;
+  try {
+    await deleteDoc(doc(db, 'attendance', attendanceId));
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, path);
+  }
+}
+
 export async function saveAccountToDb(
   account: AppAccount,
   isUpdate = false

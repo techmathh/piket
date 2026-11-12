@@ -796,3 +796,390 @@ export function calculatePeriodRecap(
     memberRows,
   };
 }
+
+export interface ShiftCheckInProgress {
+  totalMembers: number;
+  checkedInCount: number; // hadir + terlambat
+  hadirCount: number;
+  terlambatCount: number;
+  excusedCount: number; // izin + sakit
+  absentCount: number; // tidak_piket
+  pendingCount: number; // belum_absen
+  recordedCount: number; // totalMembers - pendingCount
+  checkedInPercentage: number; // 0 - 100
+  excusedPercentage: number; // 0 - 100
+  absentPercentage: number; // 0 - 100
+  recordedPercentage: number; // 0 - 100
+}
+
+/**
+ * Calculates check-in progress metrics for a list of duty members on a shift or across shifts.
+ */
+export function calculateShiftCheckInProgress(
+  dutyMembers: ResolvedDutyMember[]
+): ShiftCheckInProgress {
+  const totalMembers = dutyMembers.length;
+  let hadirCount = 0;
+  let terlambatCount = 0;
+  let excusedCount = 0;
+  let absentCount = 0;
+  let pendingCount = 0;
+
+  for (const dm of dutyMembers) {
+    if (dm.effectiveStatus === 'hadir') hadirCount += 1;
+    else if (dm.effectiveStatus === 'terlambat') terlambatCount += 1;
+    else if (dm.effectiveStatus === 'izin' || dm.effectiveStatus === 'sakit')
+      excusedCount += 1;
+    else if (dm.effectiveStatus === 'tidak_piket') absentCount += 1;
+    else pendingCount += 1;
+  }
+
+  const checkedInCount = hadirCount + terlambatCount;
+  const recordedCount = totalMembers - pendingCount;
+
+  const checkedInPercentage =
+    totalMembers > 0 ? Math.round((checkedInCount / totalMembers) * 100) : 0;
+  const excusedPercentage =
+    totalMembers > 0 ? Math.round((excusedCount / totalMembers) * 100) : 0;
+  const absentPercentage =
+    totalMembers > 0 ? Math.round((absentCount / totalMembers) * 100) : 0;
+  const recordedPercentage =
+    totalMembers > 0 ? Math.round((recordedCount / totalMembers) * 100) : 0;
+
+  return {
+    totalMembers,
+    checkedInCount,
+    hadirCount,
+    terlambatCount,
+    excusedCount,
+    absentCount,
+    pendingCount,
+    recordedCount,
+    checkedInPercentage,
+    excusedPercentage,
+    absentPercentage,
+    recordedPercentage,
+  };
+}
+
+/**
+ * Finds the current active shift based on `currentTimeHHMM` (e.g., "07:05") or
+ * selects the most relevant shift from `schedules`.
+ */
+export function findCurrentActiveShift(
+  schedules: ResolvedScheduleForDate[],
+  currentTimeHHMM: string,
+  scheduleFilter = 'all'
+): {
+  activeShift: ResolvedScheduleForDate | null;
+  isLiveInTimeWindow: boolean;
+} {
+  if (schedules.length === 0) {
+    return { activeShift: null, isLiveInTimeWindow: false };
+  }
+
+  if (scheduleFilter !== 'all') {
+    const filtered = schedules.find((s) => s.schedule.id === scheduleFilter);
+    if (filtered) {
+      const hhmm = currentTimeHHMM.slice(0, 5);
+      const isLive =
+        hhmm >= filtered.schedule.startTime &&
+        hhmm <= filtered.schedule.endTime;
+      return { activeShift: filtered, isLiveInTimeWindow: isLive };
+    }
+  }
+
+  const hhmm = currentTimeHHMM.slice(0, 5);
+  // 1. Check if any shift's time window contains currentTimeHHMM
+  const liveMatch = schedules.find(
+    (s) => hhmm >= s.schedule.startTime && hhmm <= s.schedule.endTime
+  );
+  if (liveMatch) {
+    return { activeShift: liveMatch, isLiveInTimeWindow: true };
+  }
+
+  // 2. Otherwise find the next upcoming shift today
+  const upcomingMatch = schedules.find((s) => s.schedule.startTime > hhmm);
+  if (upcomingMatch) {
+    return { activeShift: upcomingMatch, isLiveInTimeWindow: false };
+  }
+
+  // 3. Fallback to the latest shift of the day
+  return {
+    activeShift: schedules[schedules.length - 1],
+    isLiveInTimeWindow: false,
+  };
+}
+
+export interface ShiftTimelineStatus {
+  state: 'live' | 'upcoming' | 'completed' | 'empty';
+  headline: string;
+  subline: string;
+  targetSchedule: ResolvedScheduleForDate | null;
+}
+
+/**
+ * Computes a human-friendly operational timeline summary for the displayed day's shifts
+ * based on `currentTimeHHMM` (e.g. "07:15").
+ */
+export function getShiftTimelineStatus(
+  schedules: ResolvedScheduleForDate[],
+  currentTimeHHMM: string,
+  isShowingToday: boolean
+): ShiftTimelineStatus {
+  if (schedules.length === 0) {
+    return {
+      state: 'empty',
+      headline: 'Tidak Ada Jadwal Aktif',
+      subline: 'Hari libur piket atau di luar jadwal.',
+      targetSchedule: null,
+    };
+  }
+
+  if (!isShowingToday) {
+    return {
+      state: 'upcoming',
+      headline: `${schedules.length} Pos Piket Terjadwal`,
+      subline: schedules
+        .map((s) => `${s.schedule.title} (${s.schedule.startTime})`)
+        .join(' · '),
+      targetSchedule: schedules[0],
+    };
+  }
+
+  const hhmm = currentTimeHHMM.slice(0, 5);
+  const liveShift = schedules.find(
+    (s) => hhmm >= s.schedule.startTime && hhmm <= s.schedule.endTime
+  );
+  if (liveShift) {
+    return {
+      state: 'live',
+      headline: `Sedang Berlangsung: ${liveShift.schedule.title}`,
+      subline: `Pukul ${liveShift.schedule.startTime} – ${liveShift.schedule.endTime} WIB · ${liveShift.schedule.location}`,
+      targetSchedule: liveShift,
+    };
+  }
+
+  const nextShift = schedules.find((s) => s.schedule.startTime > hhmm);
+  if (nextShift) {
+    return {
+      state: 'upcoming',
+      headline: `Pos Berikutnya: ${nextShift.schedule.title}`,
+      subline: `Mulai pukul ${nextShift.schedule.startTime} – ${nextShift.schedule.endTime} WIB · ${nextShift.schedule.location}`,
+      targetSchedule: nextShift,
+    };
+  }
+
+  const lastShift = schedules[schedules.length - 1];
+  return {
+    state: 'completed',
+    headline: 'Seluruh Sesi Piket Hari Ini Telah Selesai',
+    subline: `${schedules.length} pos piket telah terlaksana hingga pukul ${lastShift.schedule.endTime} WIB`,
+    targetSchedule: lastShift,
+  };
+}
+
+export const MONDAY_FIRST_DAYS: number[] = [1, 2, 3, 4, 5, 6, 0];
+
+/**
+ * Formats an array of active day numbers (0 = Minggu .. 6 = Sabtu) into a readable Indonesian label.
+ */
+export function formatActiveDaysLabel(activeDays?: number[]): string {
+  const raw =
+    activeDays && activeDays.length > 0 ? activeDays : [1, 2, 3, 4, 5];
+  const unique = Array.from(new Set(raw));
+  const ordered = MONDAY_FIRST_DAYS.filter((d) => unique.includes(d));
+
+  if (ordered.length === 0) return 'Belum ada hari aktif';
+  if (ordered.length === 7) return 'Setiap Hari (Senin–Minggu)';
+  if (
+    ordered.length === 5 &&
+    ordered.every((d, i) => d === [1, 2, 3, 4, 5][i])
+  ) {
+    return 'Senin – Jumat';
+  }
+  if (
+    ordered.length === 6 &&
+    ordered.every((d, i) => d === [1, 2, 3, 4, 5, 6][i])
+  ) {
+    return 'Senin – Sabtu';
+  }
+  return ordered.map((d) => DAY_NAMES_ID[d]).join(', ');
+}
+
+export const DAY_NOTE_SCHEDULE_ID = '__DAY_NOTE__';
+export const DAY_NOTE_MEMBER_ID = '__NOTE__';
+
+export const DAY_ATTENDANCE_NOTE_PRESETS: string[] = [
+  'Libur Nasional / Tanggal Merah',
+  'Libur Sekolah / Cuti Bersama',
+  'Kegiatan Classmeeting / Acara Sekolah',
+  'Sedang Ujian (UTS / UAS / US)',
+  'Rapat Dewan Guru / Pulang Cepat',
+  'Cuaca Hujan Deras / Kondisional',
+];
+
+export const MEMBER_ATTENDANCE_NOTE_PRESETS: string[] = [
+  'Libur / Bebas Piket',
+  'Dispensasi Kegiatan OSIS / MPK',
+  'Izin Lomba / Delegasi Sekolah',
+  'Izin Urusan Keluarga',
+  'Sakit (Istirahat UKS / Rumah)',
+  'Sedang Mengikuti Ujian Susulan',
+];
+
+export interface DayAttendanceNoteInfo {
+  id: string;
+  date: string;
+  scheduleId: string;
+  note: string;
+  isHoliday: boolean;
+  recordedBy: string;
+}
+
+/**
+ * Retrieves a day-level or schedule-level general note/holiday remark (e.g. "Libur Nasional")
+ * stored inside attendanceRecords.
+ */
+export function getDayAttendanceNote(
+  dateStr: string,
+  attendanceRecords: AttendanceRecord[],
+  scheduleId: string = DAY_NOTE_SCHEDULE_ID
+): DayAttendanceNoteInfo | null {
+  const found = attendanceRecords.find(
+    (r) =>
+      r.date === dateStr &&
+      r.scheduleId === scheduleId &&
+      r.memberId === DAY_NOTE_MEMBER_ID
+  );
+  if (!found || !found.note || !found.note.trim()) {
+    return null;
+  }
+  return {
+    id: found.id,
+    date: found.date,
+    scheduleId: found.scheduleId,
+    note: found.note.trim(),
+    isHoliday: found.checkInTime === 'LIBUR',
+    recordedBy: found.recordedBy,
+  };
+}
+
+/**
+ * Builds a valid AttendanceRecord payload for storing a day-level or pos-level Keterangan (e.g. Libur)
+ * in Firestore's `attendance` collection while satisfying strict security rules.
+ */
+export function createDayAttendanceNoteRecord(
+  dateStr: string,
+  note: string,
+  isHoliday: boolean,
+  recordedBy: string,
+  scheduleId: string = DAY_NOTE_SCHEDULE_ID
+): AttendanceRecord {
+  return {
+    id: `att-${dateStr}-${scheduleId}-${DAY_NOTE_MEMBER_ID}`,
+    date: dateStr,
+    scheduleId,
+    memberId: DAY_NOTE_MEMBER_ID,
+    status: 'izin',
+    checkInTime: isHoliday ? 'LIBUR' : 'INFO',
+    note: note.trim().slice(0, 500),
+    recordedBy: (recordedBy || 'Admin Pengurus OSIS').slice(0, 120),
+  };
+}
+
+export interface MemberPersonalScheduleEntry {
+  scheduleId: string;
+  title: string;
+  location: string;
+  timeRange: string;
+  weekNum: number;
+  days: number[];
+  customDates?: string[];
+}
+
+/**
+ * Resolves all 4-week cycle and custom-day duty assignments for a specific member.
+ */
+export function getMemberPersonalSchedules(
+  memberId: string,
+  allSchedules: PiketSchedule[]
+): MemberPersonalScheduleEntry[] {
+  const normTarget = normalizeMemberId(memberId);
+  const list: MemberPersonalScheduleEntry[] = [];
+
+  for (const sch of allSchedules) {
+    const weekNum = sch.activeWeeks?.[0] || 1;
+    const dailyNorm = sch.dailyMembers.map(normalizeMemberId);
+    const activeOrderedDays = MONDAY_FIRST_DAYS.filter((d) =>
+      (sch.activeDays && sch.activeDays.length > 0
+        ? sch.activeDays
+        : [1, 2, 3, 4, 5]
+      ).includes(d)
+    );
+
+    if (sch.mode === 'harian' && dailyNorm.includes(normTarget)) {
+      list.push({
+        scheduleId: sch.id,
+        title: sch.title,
+        location: sch.location,
+        timeRange: `${sch.startTime} – ${sch.endTime}`,
+        weekNum,
+        days:
+          activeOrderedDays.length <= 5
+            ? activeOrderedDays
+            : [1, 2, 3, 4, 5],
+      });
+    } else if (sch.mode === 'mingguan') {
+      const matchedDays: number[] = [];
+      for (const d of MONDAY_FIRST_DAYS) {
+        if (
+          sch.activeDays &&
+          sch.activeDays.length > 0 &&
+          !sch.activeDays.includes(d)
+        ) {
+          continue;
+        }
+        const ids = (sch.weeklyAssignments[d] || []).map(normalizeMemberId);
+        if (ids.includes(normTarget)) matchedDays.push(d);
+      }
+      if (matchedDays.length > 0) {
+        list.push({
+          scheduleId: sch.id,
+          title: sch.title,
+          location: sch.location,
+          timeRange: `${sch.startTime} – ${sch.endTime}`,
+          weekNum,
+          days: matchedDays,
+        });
+      }
+    } else if (sch.mode === 'custom') {
+      const matchedCustomDates = (sch.customDates || []).filter((dt) => {
+        const specific = sch.customDateAssignments?.[dt];
+        const ids = (
+          specific && specific.length > 0 ? specific : sch.dailyMembers
+        ).map(normalizeMemberId);
+        return ids.includes(normTarget);
+      });
+      if (matchedCustomDates.length > 0) {
+        const customDayNums = Array.from(
+          new Set(matchedCustomDates.map((dt) => parseDateString(dt).getDay()))
+        );
+        list.push({
+          scheduleId: sch.id,
+          title: sch.title,
+          location: sch.location,
+          timeRange: `${sch.startTime} – ${sch.endTime}`,
+          weekNum,
+          days: customDayNums,
+          customDates: matchedCustomDates,
+        });
+      }
+    }
+  }
+
+  return list.sort((a, b) => a.weekNum - b.weekNum);
+}
+
+
+
