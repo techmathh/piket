@@ -31,6 +31,7 @@ import { banner3dImg } from '../assets/brandAssets';
 
 interface ScheduleManagerProps {
   todayStr: string;
+  selectedDate?: string;
   schedules: PiketSchedule[];
   members: OsisMember[];
   swaps: ScheduleSwap[];
@@ -65,6 +66,7 @@ function matchesPosCategory(
 
 export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
   todayStr,
+  selectedDate,
   schedules,
   members,
   swaps,
@@ -74,9 +76,9 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
   onDeleteSwap,
   onOpenSwapModal,
 }) => {
-  // Default to the current active week (1..4) so the admin sees the 3 relevant schedules immediately
+  // Default to the current active week (1..4) of selectedDate or todayStr so the admin sees the 3 relevant schedules immediately
   const [selectedWeek, setSelectedWeek] = useState<number | 'all'>(() =>
-    getWeekOfMonth(todayStr)
+    getWeekOfMonth(selectedDate || todayStr)
   );
   const [posCategory, setPosCategory] = useState<
     'all' | 'gerbang' | 'warsis' | 'shalat'
@@ -322,13 +324,22 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
       const nextActiveDays = Array.from(
         new Set([...schedule.activeDays, dayNum])
       );
+      const updatedWeekly: Record<number, string[]> = {
+        ...schedule.weeklyAssignments,
+        [dayNum]: nextDayMembers,
+      };
+      // If weekend days are currently using the default fallback (0 mirrors 1, 6 mirrors 5), keep them synced
+      if (
+        customDaysOpenForScheduleId !== schedule.id &&
+        schedule.activeDays.length === 7
+      ) {
+        if (dayNum === 1) updatedWeekly[0] = nextDayMembers;
+        if (dayNum === 5) updatedWeekly[6] = nextDayMembers;
+      }
       onUpdateSchedule({
         ...schedule,
         activeDays: nextActiveDays,
-        weeklyAssignments: {
-          ...schedule.weeklyAssignments,
-          [dayNum]: nextDayMembers,
-        },
+        weeklyAssignments: updatedWeekly,
       });
     } else {
       // Custom date string YYYY-MM-DD
@@ -372,14 +383,23 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
       });
     } else if (typeof dayOrMode === 'number') {
       const current = schedule.weeklyAssignments[dayOrMode] || [];
+      const nextDayMembers = current.filter(
+        (id) => normalizeMemberId(id) !== normRemove
+      );
+      const updatedWeekly: Record<number, string[]> = {
+        ...schedule.weeklyAssignments,
+        [dayOrMode]: nextDayMembers,
+      };
+      if (
+        customDaysOpenForScheduleId !== schedule.id &&
+        schedule.activeDays.length === 7
+      ) {
+        if (dayOrMode === 1) updatedWeekly[0] = nextDayMembers;
+        if (dayOrMode === 5) updatedWeekly[6] = nextDayMembers;
+      }
       onUpdateSchedule({
         ...schedule,
-        weeklyAssignments: {
-          ...schedule.weeklyAssignments,
-          [dayOrMode]: current.filter(
-            (id) => normalizeMemberId(id) !== normRemove
-          ),
-        },
+        weeklyAssignments: updatedWeekly,
       });
     } else {
       const dateKey = String(dayOrMode);

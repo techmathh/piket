@@ -15,11 +15,13 @@ import {
   deleteDoc,
   onSnapshot,
   getDocFromServer,
+  getDocsFromServer,
   writeBatch,
 } from 'firebase/firestore';
 import {
   PERMANENT_DEVELOPER_ACCOUNT,
   canDeleteAccount,
+  sanitizeScheduleForDb,
   type AppAccount,
   type AttendanceRecord,
   type OsisMember,
@@ -27,27 +29,30 @@ import {
   type ScheduleSwap,
 } from './utils/piketLogic';
 
+const metaEnv =
+  (import.meta as unknown as { env?: Record<string, string | undefined> })
+    .env || {};
+
 const firebaseConfig = {
-  projectId:
-    import.meta.env.VITE_FIREBASE_PROJECT_ID || 'digital-web-7s7sz',
+  projectId: metaEnv.VITE_FIREBASE_PROJECT_ID || 'digital-web-7s7sz',
   appId:
-    import.meta.env.VITE_FIREBASE_APP_ID ||
+    metaEnv.VITE_FIREBASE_APP_ID ||
     '1:600016534856:web:da2b5c85ad03a59e58477d',
   apiKey:
-    import.meta.env.VITE_FIREBASE_API_KEY ||
+    metaEnv.VITE_FIREBASE_API_KEY ||
     'AIzaSyAvo1cYV60p8ID9RJKvQxkdPGimqUs4A6s',
   authDomain:
-    import.meta.env.VITE_FIREBASE_AUTH_DOMAIN ||
+    metaEnv.VITE_FIREBASE_AUTH_DOMAIN ||
     'digital-web-7s7sz.firebaseapp.com',
   firestoreDatabaseId:
-    import.meta.env.VITE_FIREBASE_DATABASE_ID ||
+    metaEnv.VITE_FIREBASE_DATABASE_ID ||
     'ai-studio-osispikettracker-91d7bbc8-4846-4163-8084-06211ffadcdd',
   storageBucket:
-    import.meta.env.VITE_FIREBASE_STORAGE_BUCKET ||
+    metaEnv.VITE_FIREBASE_STORAGE_BUCKET ||
     'digital-web-7s7sz.firebasestorage.app',
   messagingSenderId:
-    import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '600016534856',
-  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID || '',
+    metaEnv.VITE_FIREBASE_MESSAGING_SENDER_ID || '600016534856',
+  measurementId: metaEnv.VITE_FIREBASE_MEASUREMENT_ID || '',
 };
 
 const app = initializeApp(firebaseConfig);
@@ -175,31 +180,9 @@ export async function saveScheduleToDb(
   schedule: PiketSchedule,
   isUpdate = false
 ): Promise<void> {
-  const path = `schedules/${schedule.id}`;
+  const cleanSchedule = sanitizeScheduleForDb(schedule);
+  const path = `schedules/${cleanSchedule.id}`;
   try {
-    const cleanSchedule: PiketSchedule = {
-      id: String(schedule.id),
-      title: String(schedule.title).slice(0, 150),
-      description: String(schedule.description || '').slice(0, 500),
-      location: String(schedule.location).slice(0, 150),
-      startTime: String(schedule.startTime).slice(0, 20),
-      endTime: String(schedule.endTime).slice(0, 20),
-      mode: schedule.mode,
-      tasks: Array.isArray(schedule.tasks) ? schedule.tasks.slice(0, 50) : [],
-      activeWeeks:
-        Array.isArray(schedule.activeWeeks) && schedule.activeWeeks.length > 0
-          ? schedule.activeWeeks
-          : [1, 2, 3, 4],
-      activeDays: Array.isArray(schedule.activeDays) ? schedule.activeDays : [],
-      dailyMembers: Array.isArray(schedule.dailyMembers)
-        ? schedule.dailyMembers
-        : [],
-      weeklyAssignments: schedule.weeklyAssignments || {},
-      customDates: Array.isArray(schedule.customDates)
-        ? schedule.customDates
-        : [],
-      customDateAssignments: schedule.customDateAssignments || {},
-    };
     await setDoc(doc(db, 'schedules', cleanSchedule.id), cleanSchedule);
   } catch (err) {
     handleFirestoreError(
@@ -357,47 +340,52 @@ export async function seedOfficialSchedulesToDb(
   schedules: PiketSchedule[]
 ): Promise<void> {
   try {
-    const batch = writeBatch(db);
-    // Ensure permanent developer account is always seeded in Firebase Firestore
-    batch.set(
-      doc(db, 'accounts', PERMANENT_DEVELOPER_ACCOUNT.id),
-      PERMANENT_DEVELOPER_ACCOUNT
-    );
+    const [membersSnap, schedulesSnap, devAccountSnap] = await Promise.all([
+      getDocsFromServer(collection(db, 'members')),
+      getDocsFromServer(collection(db, 'schedules')),
+      getDocFromServer(doc(db, 'accounts', PERMANENT_DEVELOPER_ACCOUNT.id)),
+    ]);
 
-    for (const m of members) {
-      const cleanMember: OsisMember = {
-        id: String(m.id),
-        name: String(m.name).slice(0, 120),
-        kelas: String(m.kelas).slice(0, 60),
-        jabatan: String(m.jabatan).slice(0, 120),
-        phone: String(m.phone || '-').slice(0, 50),
-        active: Boolean(m.active),
-      };
-      batch.set(doc(db, 'members', cleanMember.id), cleanMember);
+    const batch = writeBatch(db);
+    let hasWrites = false;
+
+    if (!devAccountSnap.exists()) {
+      batch.set(
+        doc(db, 'accounts', PERMANENT_DEVELOPER_ACCOUNT.id),
+        PERMANENT_DEVELOPER_ACCOUNT
+      );
+      hasWrites = true;
     }
-    for (const s of schedules) {
-      const cleanSchedule: PiketSchedule = {
-        id: String(s.id),
-        title: String(s.title).slice(0, 150),
-        description: String(s.description || '').slice(0, 500),
-        location: String(s.location).slice(0, 150),
-        startTime: String(s.startTime).slice(0, 20),
-        endTime: String(s.endTime).slice(0, 20),
-        mode: s.mode,
-        tasks: Array.isArray(s.tasks) ? s.tasks.slice(0, 50) : [],
-        activeWeeks:
-          Array.isArray(s.activeWeeks) && s.activeWeeks.length > 0
-            ? s.activeWeeks
-            : [1, 2, 3, 4],
-        activeDays: Array.isArray(s.activeDays) ? s.activeDays : [],
-        dailyMembers: Array.isArray(s.dailyMembers) ? s.dailyMembers : [],
-        weeklyAssignments: s.weeklyAssignments || {},
-        customDates: Array.isArray(s.customDates) ? s.customDates : [],
-        customDateAssignments: s.customDateAssignments || {},
-      };
-      batch.set(doc(db, 'schedules', cleanSchedule.id), cleanSchedule);
+
+    // Only seed members if the server truly has 0 member documents
+    if (membersSnap.empty) {
+      for (const m of members) {
+        const cleanMember: OsisMember = {
+          id: String(m.id),
+          name: String(m.name).slice(0, 120),
+          kelas: String(m.kelas).slice(0, 60),
+          jabatan: String(m.jabatan).slice(0, 120),
+          phone: String(m.phone || '-').slice(0, 50),
+          active: Boolean(m.active),
+        };
+        batch.set(doc(db, 'members', cleanMember.id), cleanMember);
+      }
+      hasWrites = true;
     }
-    await batch.commit();
+
+    // CRITICAL: Only seed schedules if the server truly has 0 schedule documents.
+    // NEVER overwrite existing schedules on the server when another device connects!
+    if (schedulesSnap.empty) {
+      for (const s of schedules) {
+        const cleanSchedule = sanitizeScheduleForDb(s);
+        batch.set(doc(db, 'schedules', cleanSchedule.id), cleanSchedule);
+      }
+      hasWrites = true;
+    }
+
+    if (hasWrites) {
+      await batch.commit();
+    }
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, 'seed_official_schedules');
   }

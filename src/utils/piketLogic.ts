@@ -405,7 +405,9 @@ export function getBaseMemberIdsForScheduleOnDate(
     if (!isActive) return { isActive: false, memberIds: [] };
     const specific = schedule.weeklyAssignments[dayOfWeek];
     const members =
-      specific && specific.length > 0 ? specific : schedule.dailyMembers;
+      schedule.dailyMembers && schedule.dailyMembers.length > 0
+        ? schedule.dailyMembers
+        : specific || [];
     return { isActive: true, memberIds: members.map(normalizeMemberId) };
   }
 
@@ -431,6 +433,158 @@ export function getBaseMemberIdsForScheduleOnDate(
   }
 
   return { isActive: false, memberIds: [] };
+}
+
+/**
+ * Sanitizes and normalizes a PiketSchedule object before saving to or reading from Firestore
+ * so all fields strictly satisfy Firestore security rules and legacy member IDs are normalized.
+ */
+export function sanitizeScheduleForDb(schedule: PiketSchedule): PiketSchedule {
+  const validMode: ScheduleMode =
+    schedule.mode === 'harian' ||
+    schedule.mode === 'mingguan' ||
+    schedule.mode === 'custom'
+      ? schedule.mode
+      : 'mingguan';
+
+  const cleanWeekly: Record<number, string[]> = {};
+  if (
+    schedule.weeklyAssignments &&
+    typeof schedule.weeklyAssignments === 'object'
+  ) {
+    for (const [k, v] of Object.entries(schedule.weeklyAssignments)) {
+      const dayNum = Number(k);
+      if (
+        !Number.isNaN(dayNum) &&
+        dayNum >= 0 &&
+        dayNum <= 6 &&
+        Array.isArray(v)
+      ) {
+        cleanWeekly[dayNum] = Array.from(
+          new Set(
+            v
+              .filter(
+                (id): id is string =>
+                  typeof id === 'string' && id.trim().length > 0
+              )
+              .map((id) => normalizeMemberId(id.trim()))
+          )
+        );
+      }
+    }
+  }
+
+  const cleanCustomMap: Record<string, string[]> = {};
+  if (
+    schedule.customDateAssignments &&
+    typeof schedule.customDateAssignments === 'object'
+  ) {
+    for (const [dt, v] of Object.entries(schedule.customDateAssignments)) {
+      if (typeof dt === 'string' && dt.trim().length > 0 && Array.isArray(v)) {
+        cleanCustomMap[dt.trim()] = Array.from(
+          new Set(
+            v
+              .filter(
+                (id): id is string =>
+                  typeof id === 'string' && id.trim().length > 0
+              )
+              .map((id) => normalizeMemberId(id.trim()))
+          )
+        );
+      }
+    }
+  }
+
+  const cleanTasks = Array.isArray(schedule.tasks)
+    ? schedule.tasks
+        .filter(
+          (t): t is string => typeof t === 'string' && t.trim().length > 0
+        )
+        .map((t) => t.trim())
+        .slice(0, 50)
+    : ['Menjaga ketertiban dan kebersihan pos piket'];
+
+  const cleanWeeks =
+    Array.isArray(schedule.activeWeeks) && schedule.activeWeeks.length > 0
+      ? Array.from(
+          new Set(
+            schedule.activeWeeks
+              .map(Number)
+              .filter((w) => w >= 1 && w <= 4)
+          )
+        ).sort((a, b) => a - b)
+      : [1, 2, 3, 4];
+
+  const cleanDays = Array.isArray(schedule.activeDays)
+    ? Array.from(
+        new Set(
+          schedule.activeDays
+            .map(Number)
+            .filter((d) => !Number.isNaN(d) && d >= 0 && d <= 6)
+        )
+      )
+    : [1, 2, 3, 4, 5];
+
+  const cleanDailyMembers = Array.isArray(schedule.dailyMembers)
+    ? Array.from(
+        new Set(
+          schedule.dailyMembers
+            .filter(
+              (id): id is string =>
+                typeof id === 'string' && id.trim().length > 0
+            )
+            .map((id) => normalizeMemberId(id.trim()))
+        )
+      ).slice(0, 200)
+    : [];
+
+  const cleanCustomDates = Array.isArray(schedule.customDates)
+    ? Array.from(
+        new Set(
+          schedule.customDates
+            .filter(
+              (d): d is string => typeof d === 'string' && d.trim().length === 10
+            )
+            .map((d) => d.trim())
+        )
+      )
+        .sort()
+        .slice(0, 366)
+    : [];
+
+  return {
+    id: String(schedule.id || `sch-${Date.now()}`).slice(0, 100),
+    title:
+      String(schedule.title || 'Jadwal Piket OSIS')
+        .trim()
+        .slice(0, 150) || 'Jadwal Piket OSIS',
+    description: String(schedule.description || '')
+      .trim()
+      .slice(0, 500),
+    location:
+      String(schedule.location || 'Lingkungan Sekolah')
+        .trim()
+        .slice(0, 150) || 'Lingkungan Sekolah',
+    startTime:
+      String(schedule.startTime || '06:30')
+        .trim()
+        .slice(0, 20) || '06:30',
+    endTime:
+      String(schedule.endTime || '07:15')
+        .trim()
+        .slice(0, 20) || '07:15',
+    mode: validMode,
+    tasks:
+      cleanTasks.length > 0
+        ? cleanTasks
+        : ['Menjaga ketertiban dan kebersihan pos piket'],
+    activeWeeks: cleanWeeks.length > 0 ? cleanWeeks : [1, 2, 3, 4],
+    activeDays: cleanDays,
+    dailyMembers: cleanDailyMembers,
+    weeklyAssignments: cleanWeekly,
+    customDates: cleanCustomDates,
+    customDateAssignments: cleanCustomMap,
+  };
 }
 
 /**
@@ -468,16 +622,18 @@ export function resolveSchedulesForDate(
 
     for (const baseMemberId of memberIds) {
       const activeSwap = scheduleSwaps.find(
-        (s) => s.originalMemberId === baseMemberId
+        (s) =>
+          normalizeMemberId(s.originalMemberId) ===
+          normalizeMemberId(baseMemberId)
       );
       const effectiveMemberId = activeSwap
-        ? activeSwap.replacementMemberId
-        : baseMemberId;
+        ? normalizeMemberId(activeSwap.replacementMemberId)
+        : normalizeMemberId(baseMemberId);
       const memberObj = memberMap.get(effectiveMemberId);
       if (!memberObj) continue;
 
       const originalMemberObj = activeSwap
-        ? memberMap.get(activeSwap.originalMemberId)
+        ? memberMap.get(normalizeMemberId(activeSwap.originalMemberId))
         : undefined;
 
       const attRecord =
@@ -485,7 +641,7 @@ export function resolveSchedulesForDate(
           (r) =>
             r.date === dateStr &&
             r.scheduleId === schedule.id &&
-            r.memberId === effectiveMemberId
+            normalizeMemberId(r.memberId) === effectiveMemberId
         ) || null;
 
       dutyMembers.push({
@@ -580,12 +736,15 @@ export function replaceMemberInSchedule(
   oldMemberId: string,
   newMemberId: string
 ): PiketSchedule {
+  const normOld = normalizeMemberId(oldMemberId);
+  const normNew = normalizeMemberId(newMemberId);
+
   if (schedule.mode === 'harian') {
     const nextDaily = schedule.dailyMembers.map((id) =>
-      id === oldMemberId ? newMemberId : id
+      normalizeMemberId(id) === normOld ? normNew : normalizeMemberId(id)
     );
-    if (!nextDaily.includes(newMemberId)) {
-      nextDaily.push(newMemberId);
+    if (!nextDaily.includes(normNew)) {
+      nextDaily.push(normNew);
     }
     return {
       ...schedule,
@@ -596,10 +755,10 @@ export function replaceMemberInSchedule(
   if (schedule.mode === 'mingguan' && typeof targetDayOrDate === 'number') {
     const currentList = schedule.weeklyAssignments[targetDayOrDate] || [];
     const replaced = currentList.map((id) =>
-      id === oldMemberId ? newMemberId : id
+      normalizeMemberId(id) === normOld ? normNew : normalizeMemberId(id)
     );
-    if (!replaced.includes(newMemberId)) {
-      replaced.push(newMemberId);
+    if (!replaced.includes(normNew)) {
+      replaced.push(normNew);
     }
     return {
       ...schedule,
@@ -616,10 +775,10 @@ export function replaceMemberInSchedule(
       schedule.dailyMembers ||
       [];
     const replaced = currentList.map((id) =>
-      id === oldMemberId ? newMemberId : id
+      normalizeMemberId(id) === normOld ? normNew : normalizeMemberId(id)
     );
-    if (!replaced.includes(newMemberId)) {
-      replaced.push(newMemberId);
+    if (!replaced.includes(normNew)) {
+      replaced.push(normNew);
     }
     return {
       ...schedule,
@@ -1126,7 +1285,7 @@ export function getMemberPersonalSchedules(
         timeRange: `${sch.startTime} – ${sch.endTime}`,
         weekNum,
         days:
-          activeOrderedDays.length <= 5
+          activeOrderedDays.length < 7
             ? activeOrderedDays
             : [1, 2, 3, 4, 5],
       });

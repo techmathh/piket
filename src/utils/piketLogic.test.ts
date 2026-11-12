@@ -656,3 +656,46 @@ test('formats custom active days and manages day/shift attendance notes (Libur /
   );
 });
 
+test('sanitizes schedule payloads for Firestore and prioritizes dailyMembers when mode is harian', async () => {
+  const { sanitizeScheduleForDb, getBaseMemberIdsForScheduleOnDate } =
+    await import('./piketLogic');
+
+  const dirtySchedule: PiketSchedule = {
+    id: 'sch-test-sync',
+    title: '  Jadwal Gerbang Baru  ',
+    description: '',
+    location: '  Gerbang Depan  ',
+    startTime: '06:15',
+    endTime: '07:00',
+    mode: 'harian',
+    tasks: ['  Jaga ketertiban  ', ''],
+    activeWeeks: [2, 2, 1],
+    activeDays: [1, 2, 3, 4, 5, 5],
+    dailyMembers: ['osis-rida', 'm2', 'm2'],
+    weeklyAssignments: {
+      1: ['m1'],
+    },
+    customDates: ['2026-11-12', '2026-11-12'],
+    customDateAssignments: {
+      '2026-11-12': ['osis-shahnan', 'm3'],
+    },
+  };
+
+  const clean = sanitizeScheduleForDb(dirtySchedule);
+  assert.equal(clean.title, 'Jadwal Gerbang Baru');
+  assert.equal(clean.location, 'Gerbang Depan');
+  assert.deepEqual(clean.activeWeeks, [1, 2]);
+  assert.deepEqual(clean.activeDays, [1, 2, 3, 4, 5]);
+  assert.deepEqual(clean.dailyMembers, ['osis-faridathun', 'm2']);
+  assert.deepEqual(clean.customDateAssignments['2026-11-12'], [
+    'osis-azka',
+    'm3',
+  ]);
+
+  // When mode === 'harian', dailyMembers takes priority over residual weeklyAssignments
+  const baseOnMonday = getBaseMemberIdsForScheduleOnDate(clean, '2026-11-09');
+  assert.equal(baseOnMonday.isActive, true);
+  assert.deepEqual(baseOnMonday.memberIds, ['osis-faridathun', 'm2']);
+});
+
+

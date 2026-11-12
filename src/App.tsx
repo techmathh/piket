@@ -17,6 +17,7 @@ import {
   getDefaultDisplayDateForHour,
   replaceMemberInSchedule,
   resolveSchedulesForDate,
+  sanitizeScheduleForDb,
   type AppAccount,
   type AttendanceRecord,
   type AttendanceStatus,
@@ -249,8 +250,8 @@ export default function App() {
 
     testFirestoreConnection();
 
-    const triggerInitialSeedIfNeeded = (forceHarmonize = false) => {
-      if (hasSeededRef.current && !forceHarmonize) return;
+    const triggerInitialSeedIfNeeded = () => {
+      if (hasSeededRef.current) return;
       hasSeededRef.current = true;
       const initialSchedules = createInitialSchedules(todayStr);
       seedOfficialSchedulesToDb(INITIAL_OSIS_MEMBERS, initialSchedules).catch(
@@ -259,16 +260,6 @@ export default function App() {
         }
       );
     };
-
-    try {
-      const harmonizedVersion = localStorage.getItem('sipiket_harmonized_v9');
-      if (harmonizedVersion !== 'true') {
-        localStorage.setItem('sipiket_harmonized_v9', 'true');
-        triggerInitialSeedIfNeeded(true);
-      }
-    } catch {
-      // ignore storage errors
-    }
 
     const unsubMembers = onSnapshot(
       collection(db, 'members'),
@@ -291,19 +282,9 @@ export default function App() {
           ) {
             return;
           }
-          const canonical = canonicalMap.get(raw.id);
-          list.push(
-            canonical
-              ? {
-                  ...raw,
-                  name: canonical.name,
-                  kelas: canonical.kelas,
-                  jabatan: canonical.jabatan,
-                }
-              : raw
-          );
+          list.push(raw);
         });
-        for (const reqId of ['osis-dwi', 'osis-dwi-ayu']) {
+        for (const reqId of ['osis-dwi', 'osis-dwi-ayu', 'osis-faridathun']) {
           if (!list.some((m) => m.id === reqId)) {
             const reqMember = canonicalMap.get(reqId);
             if (reqMember) list.push(reqMember);
@@ -324,9 +305,12 @@ export default function App() {
         }
         const list: PiketSchedule[] = [];
         snap.forEach((docSnap) => {
-          list.push(docSnap.data() as PiketSchedule);
+          list.push(sanitizeScheduleForDb(docSnap.data() as PiketSchedule));
         });
-        list.sort((a, b) => a.startTime.localeCompare(b.startTime));
+        list.sort(
+          (a, b) =>
+            a.startTime.localeCompare(b.startTime) || a.id.localeCompare(b.id)
+        );
         setSchedules(list);
       },
       (err) => handleFirestoreError(err, OperationType.LIST, 'schedules')
@@ -654,16 +638,37 @@ export default function App() {
   };
 
   const handleAddSchedule = async (newSchedule: PiketSchedule) => {
-    await saveScheduleToDb(newSchedule, false);
-    showToast(`Jadwal "${newSchedule.title}" berhasil disimpan ke database.`);
+    const clean = sanitizeScheduleForDb(newSchedule);
+    setSchedules((prev) =>
+      [...prev.filter((s) => s.id !== clean.id), clean].sort(
+        (a, b) =>
+          a.startTime.localeCompare(b.startTime) || a.id.localeCompare(b.id)
+      )
+    );
+    await saveScheduleToDb(clean, false);
+    showToast(
+      `Jadwal "${clean.title}" berhasil disimpan ke database & disinkronkan ke semua perangkat.`
+    );
   };
 
   const handleUpdateSchedule = async (updatedSchedule: PiketSchedule) => {
-    await saveScheduleToDb(updatedSchedule, true);
-    showToast(`Jadwal "${updatedSchedule.title}" berhasil diperbarui.`);
+    const clean = sanitizeScheduleForDb(updatedSchedule);
+    setSchedules((prev) =>
+      prev
+        .map((s) => (s.id === clean.id ? clean : s))
+        .sort(
+          (a, b) =>
+            a.startTime.localeCompare(b.startTime) || a.id.localeCompare(b.id)
+        )
+    );
+    await saveScheduleToDb(clean, true);
+    showToast(
+      `Jadwal "${clean.title}" berhasil diperbarui & tersimpan untuk semua perangkat.`
+    );
   };
 
   const handleDeleteSchedule = async (scheduleId: string) => {
+    setSchedules((prev) => prev.filter((s) => s.id !== scheduleId));
     await deleteScheduleFromDb(scheduleId);
     showToast('Jadwal piket berhasil dihapus dari database.');
   };
@@ -690,14 +695,21 @@ export default function App() {
   ) => {
     const targetSchedule = schedules.find((s) => s.id === scheduleId);
     if (!targetSchedule) return;
-    const updated = replaceMemberInSchedule(
-      targetSchedule,
-      targetDayOrDate,
-      oldMemberId,
-      newMemberId
+    const updated = sanitizeScheduleForDb(
+      replaceMemberInSchedule(
+        targetSchedule,
+        targetDayOrDate,
+        oldMemberId,
+        newMemberId
+      )
+    );
+    setSchedules((prev) =>
+      prev.map((s) => (s.id === updated.id ? updated : s))
     );
     await saveScheduleToDb(updated, true);
-    showToast('Perubahan jadwal piket permanen berhasil disimpan.');
+    showToast(
+      'Perubahan jadwal piket permanen berhasil disimpan ke semua perangkat.'
+    );
   };
 
   const handleDeleteSwap = async (swapId: string) => {
@@ -1057,6 +1069,7 @@ export default function App() {
         {isAdminView && activeTab === 'schedules' && (
           <ScheduleManager
             todayStr={todayStr}
+            selectedDate={selectedDate}
             schedules={schedules}
             members={members}
             swaps={swaps}
