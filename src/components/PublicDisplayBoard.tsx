@@ -109,10 +109,10 @@ export const PublicDisplayBoard: React.FC<PublicDisplayBoardProps> = ({
   const [isDatePickerModalOpen, setIsDatePickerModalOpen] =
     useState<boolean>(false);
 
-  // Unified Public Attendance + Personal Schedule Modal state
+  // Unified Public Attendance + Personal Schedule Modal state (IDs only so live Firestore updates stay in sync)
   const [attendanceModalTarget, setAttendanceModalTarget] = useState<{
-    schedule: PiketSchedule;
-    dutyMember: ResolvedDutyMember;
+    scheduleId: string;
+    memberId: string;
   } | null>(null);
   const [attendanceModalTab, setAttendanceModalTab] = useState<
     'absen' | 'jadwal'
@@ -145,6 +145,19 @@ export const PublicDisplayBoard: React.FC<PublicDisplayBoardProps> = ({
       setActiveView('jadwal');
     }
   }, [isLeaderboardEnabled, activeView]);
+
+  // Close open modals cleanly on Escape key
+  useEffect(() => {
+    if (!attendanceModalTarget && !isDatePickerModalOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setAttendanceModalTarget(null);
+        setIsDatePickerModalOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [attendanceModalTarget, isDatePickerModalOpen]);
 
   const tomorrowStr = addDays(todayStr, 1);
   const isShowingToday = selectedDate === todayStr;
@@ -242,7 +255,10 @@ export const PublicDisplayBoard: React.FC<PublicDisplayBoardProps> = ({
           : [rule.requiredSessions[0].id]
         : [];
 
-    setAttendanceModalTarget({ schedule, dutyMember });
+    setAttendanceModalTarget({
+      scheduleId: schedule.id,
+      memberId: dutyMember.member.id,
+    });
     setAttendanceModalTab(initialTab);
     setSelectedChoice(defaultChoice);
     setSelectedSessions(defaultSessions);
@@ -254,9 +270,29 @@ export const PublicDisplayBoard: React.FC<PublicDisplayBoardProps> = ({
     setAttendanceFormError('');
   };
 
+  // Derive live schedule & dutyMember from current resolved schedules so real-time updates never go stale
+  const liveAttendanceModalData = (() => {
+    if (!attendanceModalTarget) return null;
+    const foundSchedule = todaySchedules.find(
+      (s) => s.schedule.id === attendanceModalTarget.scheduleId
+    );
+    if (!foundSchedule) return null;
+    const foundDutyMember = foundSchedule.dutyMembers.find(
+      (dm) => dm.member.id === attendanceModalTarget.memberId
+    );
+    if (!foundDutyMember) return null;
+    return {
+      schedule: foundSchedule.schedule,
+      dutyMember: foundDutyMember,
+    };
+  })();
+
   const handleSubmitPublicAttendance = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!attendanceModalTarget) return;
+    if (!liveAttendanceModalData) return;
+
+    const { schedule: targetSchedule, dutyMember: targetDutyMember } =
+      liveAttendanceModalData;
 
     if (!dateEditStatus.canEdit) {
       setAttendanceFormError(dateEditStatus.reason);
@@ -265,19 +301,19 @@ export const PublicDisplayBoard: React.FC<PublicDisplayBoardProps> = ({
 
     const posHoliday = getHolidayForScheduleOnDate(
       selectedDate,
-      attendanceModalTarget.schedule.title,
+      targetSchedule.title,
       attendanceRecords
     );
     if (posHoliday) {
       setAttendanceFormError(
-        `${attendanceModalTarget.schedule.title} sedang libur piket (${posHoliday.reason}).`
+        `${targetSchedule.title} sedang libur piket (${posHoliday.reason}).`
       );
       return;
     }
 
     if (
-      attendanceModalTarget.dutyMember.attendance &&
-      isAttendanceVerifiedByAdmin(attendanceModalTarget.dutyMember.attendance)
+      targetDutyMember.attendance &&
+      isAttendanceVerifiedByAdmin(targetDutyMember.attendance)
     ) {
       setAttendanceFormError(
         'Status absensi sudah diverifikasi oleh Admin dan tidak dapat diubah secara publik.'
@@ -285,17 +321,14 @@ export const PublicDisplayBoard: React.FC<PublicDisplayBoardProps> = ({
       return;
     }
 
-    const windowStatus = getPosAttendanceWindowStatus(
-      attendanceModalTarget.schedule,
-      nowHHMM
-    );
+    const windowStatus = getPosAttendanceWindowStatus(targetSchedule, nowHHMM);
     if (!windowStatus.isOpen) {
       setAttendanceFormError(windowStatus.message);
       return;
     }
 
     const evalResult = evaluatePublicAttendanceSubmission({
-      scheduleTitle: attendanceModalTarget.schedule.title,
+      scheduleTitle: targetSchedule.title,
       choice: selectedChoice,
       currentTimeHHMM: nowHHMM,
       selectedSessions,
@@ -313,13 +346,17 @@ export const PublicDisplayBoard: React.FC<PublicDisplayBoardProps> = ({
     try {
       await onPublicRecordAttendance(
         selectedDate,
-        attendanceModalTarget.schedule.id,
-        attendanceModalTarget.dutyMember.member.id,
+        targetSchedule.id,
+        targetDutyMember.member.id,
         evalResult.status,
         evalResult.checkInTime,
         evalResult.note
       );
       setAttendanceModalTarget(null);
+    } catch {
+      setAttendanceFormError(
+        'Gagal mengirim absensi. Periksa koneksi internet lalu coba lagi.'
+      );
     } finally {
       setIsSubmittingAttendance(false);
     }
@@ -1044,8 +1081,8 @@ export const PublicDisplayBoard: React.FC<PublicDisplayBoardProps> = ({
       </div>
 
       {/* 4. Public Self-Attendance & Personal Schedule Modal */}
-      {attendanceModalTarget && (() => {
-        const { schedule, dutyMember } = attendanceModalTarget;
+      {liveAttendanceModalData && (() => {
+        const { schedule, dutyMember } = liveAttendanceModalData;
         const posRule = getPosRuleInfo(schedule.title);
         const posHoliday = getHolidayForScheduleOnDate(
           selectedDate,
@@ -1065,7 +1102,7 @@ export const PublicDisplayBoard: React.FC<PublicDisplayBoardProps> = ({
 
         return (
           <div
-            className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-[2px] flex items-center justify-center p-3 sm:p-4 perspective-stage"
+            className="fixed inset-0 z-50 bg-slate-900/55 flex items-center justify-center p-3 sm:p-4 perspective-stage"
             onClick={() => setAttendanceModalTarget(null)}
           >
             <motion.div
@@ -1438,7 +1475,7 @@ export const PublicDisplayBoard: React.FC<PublicDisplayBoardProps> = ({
       {/* 5. Clean 3D Date Picker Modal (Cek Jadwal Hari Lain) */}
       {isDatePickerModalOpen && (
         <div
-          className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-[2px] flex items-center justify-center p-3 sm:p-4 perspective-stage"
+          className="fixed inset-0 z-50 bg-slate-900/55 flex items-center justify-center p-3 sm:p-4 perspective-stage"
           onClick={() => setIsDatePickerModalOpen(false)}
         >
           <motion.div

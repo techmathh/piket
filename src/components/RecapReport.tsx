@@ -101,6 +101,9 @@ export const RecapReport: React.FC<RecapReportProps> = ({
     .sort((a, b) => b.date.localeCompare(a.date));
 
   const handleDownloadCsv = () => {
+    const csvEscape = (val: string | number) =>
+      `"${String(val).replace(/"/g, '""')}"`;
+
     const headers = [
       'Nama Pengurus',
       'Kelas',
@@ -117,9 +120,9 @@ export const RecapReport: React.FC<RecapReportProps> = ({
     ];
 
     const rows = filteredMemberRows.map((r) => [
-      `"${r.member.name}"`,
-      `"${r.member.kelas}"`,
-      `"${r.member.jabatan}"`,
+      csvEscape(r.member.name),
+      csvEscape(r.member.kelas),
+      csvEscape(r.member.jabatan),
       r.totalScheduled,
       r.hadir,
       r.terlambat,
@@ -127,24 +130,22 @@ export const RecapReport: React.FC<RecapReportProps> = ({
       r.sakit,
       r.tidakPiket,
       r.belumAbsen,
-      `${r.attendanceRate}%`,
-      `"${r.disciplineLabel}"`,
+      csvEscape(`${r.attendanceRate}%`),
+      csvEscape(r.disciplineLabel),
     ]);
 
-    const csvContent =
-      'data:text/csv;charset=utf-8,' +
-      [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
-
-    const encodedUri = encodeURI(csvContent);
+    const csvText = [headers.map(csvEscape).join(','), ...rows.map((e) => e.join(','))].join('\r\n');
+    const blob = new Blob(['\uFEFF' + csvText], {
+      type: 'text/csv;charset=utf-8;',
+    });
+    const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    link.setAttribute('href', encodedUri);
-    link.setAttribute(
-      'download',
-      `rekap-piket-osis-${recapType}-${periodRange.startDate}-sd-${periodRange.endDate}.csv`
-    );
+    link.href = url;
+    link.download = `rekap-piket-osis-${recapType}-${periodRange.startDate}-sd-${periodRange.endDate}.csv`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
   const handleDownloadPdf = () => {
@@ -223,25 +224,25 @@ export const RecapReport: React.FC<RecapReportProps> = ({
 
       {/* Header & Period Switcher */}
       <section className="card-3d p-5 md:p-6 space-y-5">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b-2 border-[#F3E3D0] pb-5">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2 text-xs font-bold text-orange-600">
+        <div className="flex flex-col gap-4 border-b border-slate-200 pb-5">
+          <div className="space-y-1 min-w-0">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs font-bold text-orange-600">
               <span>Evaluasi Kedisiplinan Pengurus OSIS</span>
               <span aria-hidden="true">·</span>
-              <span className="font-mono tabular-nums text-stone-700">
+              <span className="font-mono tabular-nums text-slate-700">
                 Periode {periodRange.startDate} s/d {periodRange.endDate}
               </span>
             </div>
-            <h1 className="text-2xl font-bold text-stone-900">
+            <h1 className="text-xl sm:text-2xl font-bold text-slate-900">
               Rekapitulasi Absensi Mingguan & Bulanan
             </h1>
-            <p className="text-sm text-stone-600">
+            <p className="text-sm text-slate-600">
               Laporan kehadiran piket pengurus OSIS dari database untuk evaluasi
               mingguan BPH maupun laporan bulanan.
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3 shrink-0">
+          <div className="flex flex-wrap items-center gap-2.5">
             {/* Segmented Mode Control: Rekap Mingguan vs Rekap Bulanan */}
             <div className="flex items-center gap-1 p-1 bg-[#FFF3E0] rounded-xl">
               <button
@@ -416,11 +417,20 @@ export const RecapReport: React.FC<RecapReportProps> = ({
             className="px-3 py-1.5 text-xs bg-white border-2 border-[#E7D5C0] rounded-xl text-stone-800"
           >
             <option value="all">Semua Jadwal Piket</option>
-            {schedules.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.title}
-              </option>
-            ))}
+            {schedules.map((s) => {
+              const weekTag =
+                s.activeWeeks &&
+                s.activeWeeks.length > 0 &&
+                s.activeWeeks.length < 4
+                  ? ` — Minggu ${s.activeWeeks.join(', ')}`
+                  : '';
+              return (
+                <option key={s.id} value={s.id}>
+                  {s.title}
+                  {weekTag}
+                </option>
+              );
+            })}
           </select>
         </div>
       </div>

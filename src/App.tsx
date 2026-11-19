@@ -47,8 +47,6 @@ import {
   db,
   collection,
   onSnapshot,
-  OperationType,
-  handleFirestoreError,
   testFirestoreConnection,
   saveMemberToDb,
   deleteMemberFromDb,
@@ -96,7 +94,9 @@ function parseHashToTab(hash: string): ActiveTab {
 const AUTH_SESSION_KEY = 'sipiket_auth_account_v1';
 
 export default function App() {
-  const todayStr = formatDateString(new Date());
+  const [todayStr, setTodayStr] = useState<string>(() =>
+    formatDateString(new Date())
+  );
   const initialDisplayDate = getDefaultDisplayDateForHour(
     todayStr,
     new Date().getHours()
@@ -112,11 +112,26 @@ export default function App() {
   useEffect(() => {
     const syncClock = () => {
       const now = new Date();
-      setCurrentTimeHHMM(
-        `${String(now.getHours()).padStart(2, '0')}:${String(
-          now.getMinutes()
-        ).padStart(2, '0')}`
-      );
+      const nextHHMM = `${String(now.getHours()).padStart(2, '0')}:${String(
+        now.getMinutes()
+      ).padStart(2, '0')}`;
+      setCurrentTimeHHMM(nextHHMM);
+
+      const nextToday = formatDateString(now);
+      setTodayStr((prevToday) => {
+        if (prevToday !== nextToday) {
+          setSelectedDate((prevSel) =>
+            prevSel === prevToday ? nextToday : prevSel
+          );
+          setNextPreviewDate((prevNext) =>
+            prevNext === addDays(prevToday, 1)
+              ? addDays(nextToday, 1)
+              : prevNext
+          );
+          return nextToday;
+        }
+        return prevToday;
+      });
     };
     const timer = window.setInterval(syncClock, 15000);
     return () => window.clearInterval(timer);
@@ -187,8 +202,17 @@ export default function App() {
     scheduleId: '',
   });
 
-  // Toast feedback message
+  // Toast feedback message with safe timer ref to prevent race conditions
   const [feedbackBanner, setFeedbackBanner] = useState<string | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+    };
+  }, []);
 
   const switchTab = (tab: ActiveTab) => {
     if (tab !== 'display' && !loggedInAccount) {
@@ -329,7 +353,9 @@ export default function App() {
         list.sort((a, b) => a.name.localeCompare(b.name));
         setMembers(list);
       },
-      (err) => handleFirestoreError(err, OperationType.LIST, 'members')
+      (err) => {
+        console.error('Firestore listener error (members):', err);
+      }
     );
 
     const unsubSchedules = onSnapshot(
@@ -355,7 +381,9 @@ export default function App() {
           });
         }
       },
-      (err) => handleFirestoreError(err, OperationType.LIST, 'schedules')
+      (err) => {
+        console.error('Firestore listener error (schedules):', err);
+      }
     );
 
     const unsubSwaps = onSnapshot(
@@ -368,7 +396,9 @@ export default function App() {
         list.sort((a, b) => b.date.localeCompare(a.date));
         setSwaps(list);
       },
-      (err) => handleFirestoreError(err, OperationType.LIST, 'swaps')
+      (err) => {
+        console.error('Firestore listener error (swaps):', err);
+      }
     );
 
     const unsubAttendance = onSnapshot(
@@ -380,7 +410,9 @@ export default function App() {
         });
         setAttendanceRecords(list);
       },
-      (err) => handleFirestoreError(err, OperationType.LIST, 'attendance')
+      (err) => {
+        console.error('Firestore listener error (attendance):', err);
+      }
     );
 
     const unsubAccounts = onSnapshot(
@@ -415,7 +447,9 @@ export default function App() {
         }
         setAccounts(list);
       },
-      (err) => handleFirestoreError(err, OperationType.LIST, 'accounts')
+      (err) => {
+        console.error('Firestore listener error (accounts):', err);
+      }
     );
 
     return () => {
@@ -429,9 +463,29 @@ export default function App() {
 
   const showToast = (msg: string) => {
     setFeedbackBanner(msg);
-    setTimeout(() => {
-      setFeedbackBanner((prev) => (prev === msg ? null : prev));
-    }, 3500);
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => {
+      setFeedbackBanner(null);
+      toastTimerRef.current = null;
+    }, 3800);
+  };
+
+  const runDbAction = async (
+    action: () => Promise<void>,
+    onSuccessMessage?: string,
+    fallbackErrorMessage = 'Gagal menyimpan perubahan ke server. Periksa koneksi lalu coba lagi.'
+  ): Promise<boolean> => {
+    try {
+      await action();
+      if (onSuccessMessage) showToast(onSuccessMessage);
+      return true;
+    } catch (err) {
+      console.error('Database action failed:', err);
+      showToast(fallbackErrorMessage);
+      return false;
+    }
   };
 
   const handleLoginSuccess = (account: AppAccount) => {
@@ -563,14 +617,13 @@ export default function App() {
       recordedBy: PUBLIC_SELF_ATTENDANCE_RECORDER,
     };
 
-    await saveAttendanceToDb(recordPayload, Boolean(existing));
-
     const memberObj = members.find((m) => m.id === memberId);
-    if (memberObj) {
-      showToast(
-        `Absensi ${memberObj.name} (${STATUS_LABELS_ID[status]}) tercatat. Menunggu verifikasi Admin.`
-      );
-    }
+    await runDbAction(
+      () => saveAttendanceToDb(recordPayload, Boolean(existing)),
+      memberObj
+        ? `Absensi ${memberObj.name} (${STATUS_LABELS_ID[status]}) tercatat. Menunggu verifikasi Admin.`
+        : `Absensi (${STATUS_LABELS_ID[status]}) tercatat.`
+    );
   };
 
   // Admin Verification & Attendance Correction Handler (Strictly Today Only)
@@ -628,14 +681,13 @@ export default function App() {
           recordedBy: recorderName,
         };
 
-    await saveAttendanceToDb(recordPayload, Boolean(existing));
-
     const memberObj = members.find((m) => m.id === memberId);
-    if (memberObj) {
-      showToast(
-        `Verifikasi ${memberObj.name} (${STATUS_LABELS_ID[status]}) tersimpan.`
-      );
-    }
+    await runDbAction(
+      () => saveAttendanceToDb(recordPayload, Boolean(existing)),
+      memberObj
+        ? `Verifikasi ${memberObj.name} (${STATUS_LABELS_ID[status]}) tersimpan.`
+        : 'Verifikasi kehadiran tersimpan.'
+    );
   };
 
   // Admin Cancel / Clear Attendance Handler (Strictly Today Only — prevents accidental click)
@@ -658,10 +710,9 @@ export default function App() {
     );
     if (!existing) return;
 
-    await deleteAttendanceFromDb(existing.id);
-
     const memberObj = members.find((m) => m.id === memberId);
-    showToast(
+    await runDbAction(
+      () => deleteAttendanceFromDb(existing.id),
       memberObj
         ? `Tanda absen ${memberObj.name} dibatalkan.`
         : 'Tanda absen berhasil dibatalkan.'
@@ -677,8 +728,8 @@ export default function App() {
       (r) => r.id === LEADERBOARD_SETTING_RECORD_ID
     );
     const payload = createLeaderboardSettingRecord(nextEnabled, recorderName);
-    await saveAttendanceToDb(payload, hasExisting);
-    showToast(
+    await runDbAction(
+      () => saveAttendanceToDb(payload, hasExisting),
       nextEnabled
         ? 'Fitur Leaderboard Pelanggaran diaktifkan untuk semua pengguna.'
         : 'Fitur Leaderboard Pelanggaran dinonaktifkan dari tampilan pengguna.'
@@ -744,8 +795,8 @@ export default function App() {
       }
     );
 
-    await saveBatchAttendanceToDb(batchPayload);
-    showToast(
+    await runDbAction(
+      () => saveBatchAttendanceToDb(batchPayload),
       `Semua petugas pada ${targetResolved.schedule.title} telah diverifikasi.`
     );
   };
@@ -802,8 +853,8 @@ export default function App() {
       }
     }
 
-    await saveBatchAttendanceToDb(batchPayload);
-    showToast(
+    await runDbAction(
+      () => saveBatchAttendanceToDb(batchPayload),
       applyToAllMembers
         ? `Keterangan "${note}" disimpan & diterapkan ke seluruh petugas.`
         : `Keterangan "${note}" berhasil disimpan.`
@@ -827,8 +878,10 @@ export default function App() {
         r.memberId === DAY_NOTE_MEMBER_ID
     );
     if (existing) {
-      await deleteAttendanceFromDb(existing.id);
-      showToast('Keterangan daftar hadir berhasil dihapus.');
+      await runDbAction(
+        () => deleteAttendanceFromDb(existing.id),
+        'Keterangan daftar hadir berhasil dihapus.'
+      );
     }
   };
 
@@ -861,8 +914,8 @@ export default function App() {
       cleanReason,
       recorderName
     );
-    await saveAttendanceToDb(holidayRecord, false);
-    showToast(
+    await runDbAction(
+      () => saveAttendanceToDb(holidayRecord, false),
       `Libur ${HOLIDAY_CATEGORY_LABELS[category]} (${formatShortDateRangeId(
         startDate,
         endDate
@@ -871,26 +924,31 @@ export default function App() {
   };
 
   const handleDeleteHolidayRange = async (holidayId: string) => {
-    await deleteAttendanceFromDb(holidayId);
-    showToast('Jadwal libur piket berhasil dihapus.');
+    await runDbAction(
+      () => deleteAttendanceFromDb(holidayId),
+      'Jadwal libur piket berhasil dihapus.'
+    );
   };
 
   const handleAddSchedule = async (newSchedule: PiketSchedule) => {
     const clean = sanitizeScheduleForDb(newSchedule);
+    const prevSchedules = schedules;
     setSchedules((prev) =>
       [...prev.filter((s) => s.id !== clean.id), clean].sort(
         (a, b) =>
           a.startTime.localeCompare(b.startTime) || a.id.localeCompare(b.id)
       )
     );
-    await saveScheduleToDb(clean, false);
-    showToast(
+    const ok = await runDbAction(
+      () => saveScheduleToDb(clean, false),
       `Jadwal "${clean.title}" berhasil disimpan ke database & disinkronkan ke semua perangkat.`
     );
+    if (!ok) setSchedules(prevSchedules);
   };
 
   const handleUpdateSchedule = async (updatedSchedule: PiketSchedule) => {
     const clean = sanitizeScheduleForDb(updatedSchedule);
+    const prevSchedules = schedules;
     setSchedules((prev) =>
       prev
         .map((s) => (s.id === clean.id ? clean : s))
@@ -899,16 +957,21 @@ export default function App() {
             a.startTime.localeCompare(b.startTime) || a.id.localeCompare(b.id)
         )
     );
-    await saveScheduleToDb(clean, true);
-    showToast(
+    const ok = await runDbAction(
+      () => saveScheduleToDb(clean, true),
       `Jadwal "${clean.title}" berhasil diperbarui & tersimpan untuk semua perangkat.`
     );
+    if (!ok) setSchedules(prevSchedules);
   };
 
   const handleDeleteSchedule = async (scheduleId: string) => {
+    const prevSchedules = schedules;
     setSchedules((prev) => prev.filter((s) => s.id !== scheduleId));
-    await deleteScheduleFromDb(scheduleId);
-    showToast('Jadwal piket berhasil dihapus dari database.');
+    const ok = await runDbAction(
+      () => deleteScheduleFromDb(scheduleId),
+      'Jadwal piket berhasil dihapus dari database.'
+    );
+    if (!ok) setSchedules(prevSchedules);
   };
 
   const handleSaveTemporarySwap = async (swap: ScheduleSwap) => {
@@ -917,17 +980,18 @@ export default function App() {
       showToast(editStatus.reason);
       return;
     }
-    const duplicate = swaps.find(
-      (s) =>
-        s.date === swap.date &&
-        s.scheduleId === swap.scheduleId &&
-        s.originalMemberId === swap.originalMemberId
-    );
-    if (duplicate && duplicate.id !== swap.id) {
-      await deleteSwapFromDb(duplicate.id);
-    }
-    await saveSwapToDb(swap);
-    showToast('Pertukaran jadwal piket sementara berhasil disimpan.');
+    await runDbAction(async () => {
+      const duplicate = swaps.find(
+        (s) =>
+          s.date === swap.date &&
+          s.scheduleId === swap.scheduleId &&
+          s.originalMemberId === swap.originalMemberId
+      );
+      if (duplicate && duplicate.id !== swap.id) {
+        await deleteSwapFromDb(duplicate.id);
+      }
+      await saveSwapToDb(swap);
+    }, 'Pertukaran jadwal piket sementara berhasil disimpan.');
   };
 
   const handleSavePermanentReplace = async (
@@ -937,7 +1001,10 @@ export default function App() {
     newMemberId: string
   ) => {
     const targetSchedule = schedules.find((s) => s.id === scheduleId);
-    if (!targetSchedule) return;
+    if (!targetSchedule) {
+      showToast('Jadwal tujuan tidak ditemukan.');
+      return;
+    }
     const updated = sanitizeScheduleForDb(
       replaceMemberInSchedule(
         targetSchedule,
@@ -946,18 +1013,22 @@ export default function App() {
         newMemberId
       )
     );
+    const prevSchedules = schedules;
     setSchedules((prev) =>
       prev.map((s) => (s.id === updated.id ? updated : s))
     );
-    await saveScheduleToDb(updated, true);
-    showToast(
+    const ok = await runDbAction(
+      () => saveScheduleToDb(updated, true),
       'Perubahan jadwal piket permanen berhasil disimpan ke semua perangkat.'
     );
+    if (!ok) setSchedules(prevSchedules);
   };
 
   const handleDeleteSwap = async (swapId: string) => {
-    await deleteSwapFromDb(swapId);
-    showToast('Pergantian jadwal dibatalkan.');
+    await runDbAction(
+      () => deleteSwapFromDb(swapId),
+      'Pergantian jadwal dibatalkan.'
+    );
   };
 
   const handleAddMember = async (
@@ -965,66 +1036,71 @@ export default function App() {
     assignScheduleId?: string,
     assignDay?: number
   ) => {
-    await saveMemberToDb(member, false);
+    await runDbAction(async () => {
+      await saveMemberToDb(member, false);
 
-    if (assignScheduleId) {
-      const targetSch = schedules.find((s) => s.id === assignScheduleId);
-      if (targetSch) {
-        if (targetSch.mode === 'harian' || targetSch.mode === 'custom') {
-          await saveScheduleToDb(
-            {
-              ...targetSch,
-              dailyMembers: Array.from(
-                new Set([...targetSch.dailyMembers, member.id])
-              ),
-            },
-            true
-          );
-        } else {
-          const day = assignDay ?? 1;
-          const existingDayList = targetSch.weeklyAssignments[day] || [];
-          await saveScheduleToDb(
-            {
-              ...targetSch,
-              activeDays: Array.from(
-                new Set([...targetSch.activeDays, day])
-              ).sort(),
-              weeklyAssignments: {
-                ...targetSch.weeklyAssignments,
-                [day]: Array.from(new Set([...existingDayList, member.id])),
+      if (assignScheduleId) {
+        const targetSch = schedules.find((s) => s.id === assignScheduleId);
+        if (targetSch) {
+          if (targetSch.mode === 'harian' || targetSch.mode === 'custom') {
+            await saveScheduleToDb(
+              {
+                ...targetSch,
+                dailyMembers: Array.from(
+                  new Set([...targetSch.dailyMembers, member.id])
+                ),
               },
-            },
-            true
-          );
+              true
+            );
+          } else {
+            const day = assignDay ?? 1;
+            const existingDayList = targetSch.weeklyAssignments[day] || [];
+            await saveScheduleToDb(
+              {
+                ...targetSch,
+                activeDays: Array.from(
+                  new Set([...targetSch.activeDays, day])
+                ).sort(),
+                weeklyAssignments: {
+                  ...targetSch.weeklyAssignments,
+                  [day]: Array.from(new Set([...existingDayList, member.id])),
+                },
+              },
+              true
+            );
+          }
         }
       }
-    }
-    showToast(`Pengurus baru "${member.name}" berhasil disimpan ke database.`);
+    }, `Pengurus baru "${member.name}" berhasil disimpan ke database.`);
   };
 
   const handleUpdateMember = async (updatedMember: OsisMember) => {
-    await saveMemberToDb(updatedMember, true);
-    showToast(`Data "${updatedMember.name}" berhasil diperbarui.`);
+    await runDbAction(
+      () => saveMemberToDb(updatedMember, true),
+      `Data "${updatedMember.name}" berhasil diperbarui.`
+    );
   };
 
   const handleDeleteMember = async (memberId: string) => {
-    await deleteMemberFromDb(memberId);
-    showToast('Data anggota berhasil dihapus dari database.');
+    await runDbAction(
+      () => deleteMemberFromDb(memberId),
+      'Data anggota berhasil dihapus dari database.'
+    );
   };
 
   // Developer Account Management Handlers
   const handleAddAdminAccount = async (newAccount: AppAccount) => {
     if (!canManageAdminAccounts(loggedInAccount)) return;
-    await saveAccountToDb(newAccount, false);
-    showToast(
-      `Akun Admin "${newAccount.displayName}" (@${newAccount.username}) berhasil ditambahkan ke Firebase.`
+    await runDbAction(
+      () => saveAccountToDb(newAccount, false),
+      `Akun Admin "${newAccount.displayName}" (@${newAccount.username}) berhasil ditambahkan.`
     );
   };
 
   const handleUpdateAdminAccount = async (updatedAccount: AppAccount) => {
     if (!canManageAdminAccounts(loggedInAccount)) return;
-    await saveAccountToDb(updatedAccount, true);
-    showToast(
+    await runDbAction(
+      () => saveAccountToDb(updatedAccount, true),
       `Akun Admin "${updatedAccount.displayName}" berhasil diperbarui.`
     );
   };
@@ -1036,8 +1112,10 @@ export default function App() {
       showToast('Akun Developer Utama bersifat permanen dan tidak bisa dihapus.');
       return;
     }
-    await deleteAccountFromDb(target);
-    showToast(`Akun Admin "@${target.username}" berhasil dihapus.`);
+    await runDbAction(
+      () => deleteAccountFromDb(target),
+      `Akun Admin "@${target.username}" berhasil dihapus.`
+    );
   };
 
   const isAdminView = activeTab !== 'display' && Boolean(loggedInAccount);
@@ -1048,7 +1126,7 @@ export default function App() {
       {/* Simplified, Clean Admin Navigation Bar with subtle 3D elevation */}
       {isAdminView && loggedInAccount && (
         <>
-          <header className="flex items-center justify-between gap-4 px-4 sm:px-6 h-14 bg-white/95 backdrop-blur-md border-b border-slate-200/90 shadow-[0_2px_12px_-4px_rgba(15,23,42,0.08)] sticky top-0 z-30">
+          <header className="flex items-center justify-between gap-4 px-4 sm:px-6 h-14 bg-white border-b border-slate-200/90 shadow-[0_2px_12px_-4px_rgba(15,23,42,0.08)] sticky top-0 z-30">
             <div className="flex items-center gap-6 min-w-0">
               <a
                 href="#admin-attendance"
@@ -1185,13 +1263,14 @@ export default function App() {
         {feedbackBanner && (
           <div
             role="status"
-            className="px-4 py-2.5 bg-stone-900 text-white text-xs font-medium rounded-xl flex items-center justify-between"
+            data-testid="app-feedback-toast"
+            className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 w-[calc(100%-2rem)] max-w-md px-4 py-3 bg-slate-900 text-white text-xs font-medium rounded-xl border border-slate-700 shadow-[0_4px_0_0_#020617,0_16px_32px_-8px_rgba(15,23,42,0.45)] flex items-center justify-between gap-3"
           >
-            <span>{feedbackBanner}</span>
+            <span className="leading-snug">{feedbackBanner}</span>
             <button
               type="button"
               onClick={() => setFeedbackBanner(null)}
-              className="text-stone-300 hover:text-white ml-4 text-xs font-semibold"
+              className="text-slate-300 hover:text-white text-xs font-semibold shrink-0"
             >
               Tutup
             </button>

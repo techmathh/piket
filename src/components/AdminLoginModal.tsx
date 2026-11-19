@@ -1,10 +1,10 @@
-import React, { useState } from 'react';
-import { Lock, User, X, Eye, EyeOff } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { motion } from 'motion/react';
+import { Lock, User, X, Eye, EyeOff, ShieldCheck } from 'lucide-react';
 import {
   authenticateAccount,
   type AppAccount,
 } from '../utils/piketLogic';
-import { mascotHeroImg } from '../assets/brandAssets';
 
 interface AdminLoginModalProps {
   accounts: AppAccount[];
@@ -21,6 +21,14 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
   const [password, setPassword] = useState<string>('');
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -39,28 +47,34 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-stone-900/60 flex items-center justify-center p-4"
+      className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4 perspective-stage"
       role="dialog"
       aria-modal="true"
       aria-labelledby="login-modal-title"
+      onClick={onClose}
     >
-      <div className="card-3d max-w-md w-full p-5 sm:p-6 space-y-5 max-h-[92vh] overflow-y-auto">
-        <div className="flex items-start justify-between gap-3 border-b-2 border-[#F3E3D0] pb-4">
-          <div className="flex items-center gap-3.5">
-            <div className="w-12 h-12 rounded-2xl border-2 border-amber-300 shadow-[0_3px_0_0_#F59E0B] overflow-hidden shrink-0 bg-[#FFF3DF]">
-              <img
-                src={mascotHeroImg}
-                alt="Maskot Login OSIS"
-                className="w-full h-full object-cover"
-              />
+      <motion.div
+        initial={{ opacity: 0, scale: 0.94, y: 14, rotateX: 8 }}
+        animate={{ opacity: 1, scale: 1, y: 0, rotateX: 0 }}
+        transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+        className="card-3d max-w-md w-full p-5 sm:p-6 space-y-5 max-h-[92vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-3 border-b border-slate-200 pb-4">
+          <div className="flex items-center gap-3">
+            <div
+              aria-hidden="true"
+              className="icon-tile-3d-sky w-11 h-11 rounded-xl flex items-center justify-center shrink-0"
+            >
+              <ShieldCheck className="w-5 h-5 text-white" />
             </div>
             <div>
-              <span className="text-xs font-bold text-orange-600">
+              <span className="text-xs font-semibold text-sky-700">
                 Akses Pengurus & Developer
               </span>
               <h2
                 id="login-modal-title"
-                className="text-xl font-bold text-stone-900"
+                className="text-lg font-bold text-slate-900"
               >
                 Login Panel Admin OSIS
               </h2>
@@ -71,9 +85,9 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
             type="button"
             onClick={onClose}
             aria-label="Tutup Login"
-            className="p-1.5 text-stone-400 hover:text-stone-700 rounded-xl"
+            className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg"
           >
-            <X className="w-5 h-5" />
+            <X className="w-4 h-4" />
           </button>
         </div>
 
@@ -81,7 +95,7 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
           {errorMessage && (
             <div
               role="alert"
-              className="p-3 rounded-xl bg-rose-50 border-2 border-rose-200 text-xs font-bold text-rose-700"
+              className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-xs font-semibold text-rose-700"
             >
               {errorMessage}
             </div>
@@ -90,22 +104,23 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
           <div className="space-y-1.5">
             <label
               htmlFor="login-username"
-              className="block text-xs font-bold text-stone-700"
+              className="block text-xs font-semibold text-slate-700"
             >
               Username
             </label>
             <div className="relative">
-              <User className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+              <User className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
               <input
                 id="login-username"
                 data-testid="login-username-input"
                 type="text"
                 required
+                autoFocus
                 autoComplete="username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 placeholder="Masukkan username..."
-                className="w-full pl-10 pr-4 py-2.5 text-sm bg-white border-2 border-[#EBD5B8] rounded-xl text-stone-900 focus:outline-none focus:border-orange-500"
+                className="w-full pl-10 pr-4 py-2.5 text-sm bg-white border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:border-slate-500"
               />
             </div>
           </div>
@@ -113,12 +128,12 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
           <div className="space-y-1.5">
             <label
               htmlFor="login-password"
-              className="block text-xs font-bold text-stone-700"
+              className="block text-xs font-semibold text-slate-700"
             >
               Password
             </label>
             <div className="relative">
-              <Lock className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+              <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
               <input
                 id="login-password"
                 data-testid="login-password-input"
@@ -128,7 +143,7 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="Masukkan password..."
-                className="w-full pl-10 pr-10 py-2.5 text-sm bg-white border-2 border-[#EBD5B8] rounded-xl text-stone-900 focus:outline-none focus:border-orange-500"
+                className="w-full pl-10 pr-10 py-2.5 text-sm bg-white border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:border-slate-500"
               />
               <button
                 type="button"
@@ -136,7 +151,7 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
                 aria-label={
                   showPassword ? 'Sembunyikan password' : 'Lihat password'
                 }
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-700"
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
               >
                 {showPassword ? (
                   <EyeOff className="w-4 h-4" />
@@ -151,20 +166,20 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="btn-3d-secondary px-4 py-2.5 text-xs font-bold"
+              className="btn-3d-secondary px-4 py-2.5 text-xs font-semibold"
             >
               Batal
             </button>
             <button
               type="submit"
               data-testid="login-submit-btn"
-              className="btn-3d-primary px-5 py-2.5 text-xs font-bold"
+              className="btn-3d-primary px-5 py-2.5 text-xs font-semibold"
             >
               Masuk ke Admin Panel
             </button>
           </div>
         </form>
-      </div>
+      </motion.div>
     </div>
   );
 };

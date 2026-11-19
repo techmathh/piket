@@ -77,9 +77,15 @@ export const MemberManager: React.FC<MemberManagerProps> = ({
   const getMemberScheduleSummary = (memberId: string): string[] => {
     const summary: string[] = [];
     for (const sch of schedules) {
+      const weekTag =
+        sch.activeWeeks &&
+        sch.activeWeeks.length > 0 &&
+        sch.activeWeeks.length < 4
+          ? ` M${sch.activeWeeks.join(',')}`
+          : '';
       const dailyNorm = sch.dailyMembers.map(normalizeMemberId);
       if (sch.mode === 'harian' && dailyNorm.includes(memberId)) {
-        summary.push(`${sch.title} (Harian)`);
+        summary.push(`${sch.title}${weekTag} (Harian)`);
       } else if (sch.mode === 'mingguan') {
         const days: string[] = [];
         for (const [dayStr, ids] of Object.entries(sch.weeklyAssignments)) {
@@ -88,7 +94,7 @@ export const MemberManager: React.FC<MemberManagerProps> = ({
           }
         }
         if (days.length > 0) {
-          summary.push(`${sch.title} (${days.join(', ')})`);
+          summary.push(`${sch.title}${weekTag} (${days.join(', ')})`);
         }
       } else if (sch.mode === 'custom') {
         const inCustom =
@@ -97,7 +103,7 @@ export const MemberManager: React.FC<MemberManagerProps> = ({
             arr.map(normalizeMemberId).includes(memberId)
           );
         if (inCustom) {
-          summary.push(`${sch.title} (Custom)`);
+          summary.push(`${sch.title}${weekTag} (Custom)`);
         }
       }
     }
@@ -138,13 +144,14 @@ export const MemberManager: React.FC<MemberManagerProps> = ({
     }
 
     if (editingMemberId) {
+      const existingMember = members.find((m) => m.id === editingMemberId);
       onUpdateMember({
         id: editingMemberId,
         name: name.trim(),
         kelas: kelas.trim(),
         jabatan: jabatan.trim(),
         phone: phone.trim() || '-',
-        active: true,
+        active: existingMember ? existingMember.active : true,
       });
     } else {
       const newMember: OsisMember = {
@@ -324,11 +331,20 @@ export const MemberManager: React.FC<MemberManagerProps> = ({
                     className="w-full px-3 py-2 text-xs bg-white border-2 border-[#E7D5C0] rounded-xl"
                   >
                     <option value="">-- Jangan tugaskan dulu --</option>
-                    {schedules.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.title} ({s.mode})
-                      </option>
-                    ))}
+                    {schedules.map((s) => {
+                      const weekTag =
+                        s.activeWeeks &&
+                        s.activeWeeks.length > 0 &&
+                        s.activeWeeks.length < 4
+                          ? ` — Minggu ${s.activeWeeks.join(', ')}`
+                          : '';
+                      return (
+                        <option key={s.id} value={s.id}>
+                          {s.title}
+                          {weekTag} ({s.mode})
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
 
