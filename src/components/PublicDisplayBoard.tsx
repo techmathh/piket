@@ -23,6 +23,7 @@ import {
   STATUS_LABELS_ID,
   addDays,
   calculateShiftCheckInProgress,
+  canPublicEditAttendanceRecord,
   evaluatePublicAttendanceSubmission,
   findDateForWeekAndDay,
   formatFullDateId,
@@ -1244,6 +1245,27 @@ export const PublicDisplayBoard: React.FC<PublicDisplayBoardProps> = ({
                         <p className="text-xs text-slate-600">
                           Absensi yang sudah diverifikasi atau diisi oleh Admin
                           tidak dapat diubah melalui halaman publik.
+                        </p>
+                      </div>
+                    ) : !canPublicEditAttendanceRecord(
+                        dutyMember.attendance,
+                        schedule.title
+                      ).allowed ? (
+                      <div
+                        data-testid="modal-violation-locked-notice"
+                        className="p-4 rounded-lg bg-rose-50 border border-rose-200 text-center space-y-2"
+                      >
+                        <Lock className="w-5 h-5 text-rose-600 mx-auto" />
+                        <p className="text-sm font-semibold text-rose-900">
+                          Data Pelanggaran Terkunci
+                        </p>
+                        <p className="text-xs text-rose-700">
+                          {
+                            canPublicEditAttendanceRecord(
+                              dutyMember.attendance,
+                              schedule.title
+                            ).reason
+                          }
                         </p>
                       </div>
                     ) : (

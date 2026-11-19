@@ -13,8 +13,11 @@ import {
   PUBLIC_SELF_ATTENDANCE_RECORDER,
   STATUS_LABELS_ID,
   addDays,
+  canAccountModifyViolationRecord,
   canDeleteAccount,
+  canDeleteViolationData,
   canManageAdminAccounts,
+  canPublicEditAttendanceRecord,
   createDayAttendanceNoteRecord,
   createHolidayRangeRecord,
   createLeaderboardSettingRecord,
@@ -25,8 +28,13 @@ import {
   getHolidayForScheduleOnDate,
   getPosAttendanceWindowStatus,
   getScheduleDateEditStatus,
+  getViolationRecordIdsToClear,
+  getViolationResetCutoff,
   isAttendanceVerifiedByAdmin,
+  isAutoAlfaSlot,
+  isFakeAttendanceRecord,
   isLeaderboardFeatureEnabled,
+  isViolationAttendanceRecord,
   LEADERBOARD_SETTING_RECORD_ID,
   replaceMemberInSchedule,
   resolveSchedulesForDate,
@@ -61,6 +69,8 @@ import {
   deleteAccountFromDb,
   seedOfficialSchedulesToDb,
   syncOfficialScheduleTimeWindowsIfLegacy,
+  clearViolationDatabaseInDb,
+  resetAllDatabaseDataInDb,
 } from './firebase';
 import { PublicDisplayBoard } from './components/PublicDisplayBoard';
 import { LiveDisplayAndAttendance } from './components/LiveDisplayAndAttendance';
@@ -599,9 +609,14 @@ export default function App() {
         r.memberId === memberId
     );
 
-    if (existing && isAttendanceVerifiedByAdmin(existing)) {
+    const publicEditCheck = canPublicEditAttendanceRecord(
+      existing || null,
+      targetSchedule?.title || ''
+    );
+    if (!publicEditCheck.allowed) {
       showToast(
-        'Status absensi sudah diverifikasi oleh Admin dan tidak dapat diubah secara publik.'
+        publicEditCheck.reason ||
+          'Data absensi atau pelanggaran tidak dapat diubah secara publik.'
       );
       return;
     }
@@ -654,6 +669,56 @@ export default function App() {
         r.scheduleId === scheduleId &&
         r.memberId === memberId
     );
+
+    const targetIsFake = Boolean(
+      note &&
+        isFakeAttendanceRecord({
+          id: 'check',
+          date,
+          scheduleId,
+          memberId,
+          status,
+          checkInTime,
+          note,
+          recordedBy: '',
+        })
+    );
+    const violationModPerm = canAccountModifyViolationRecord(
+      loggedInAccount,
+      existing || null,
+      status,
+      targetIsFake
+    );
+    if (!violationModPerm.allowed) {
+      showToast(
+        violationModPerm.reason ||
+          'Admin tidak dapat menghapus atau mengubah data pelanggaran.'
+      );
+      return;
+    }
+
+    const targetScheduleObj = schedules.find((s) => s.id === scheduleId);
+    const isCurrentAutoAlfa =
+      !existing &&
+      Boolean(targetScheduleObj) &&
+      isAutoAlfaSlot(
+        date,
+        targetScheduleObj!,
+        autoAlfaContext,
+        attendanceRecords
+      );
+    if (
+      isCurrentAutoAlfa &&
+      !canDeleteViolationData(loggedInAccount) &&
+      status !== 'tidak_piket' &&
+      status !== 'terlambat' &&
+      !targetIsFake
+    ) {
+      showToast(
+        'Status Otomatis Alfa dilindungi. Admin tidak dapat mengubahnya menjadi Hadir/Izin (khusus Developer).'
+      );
+      return;
+    }
 
     const recorderName = formatAdminVerifierName(loggedInAccount?.displayName);
 
@@ -710,6 +775,16 @@ export default function App() {
     );
     if (!existing) return;
 
+    if (
+      isViolationAttendanceRecord(existing) &&
+      !canDeleteViolationData(loggedInAccount)
+    ) {
+      showToast(
+        'Data pelanggaran (Terlambat / Alfa / Dia Bohong) dilindungi dan hanya dapat dihapus oleh Developer.'
+      );
+      return;
+    }
+
     const memberObj = members.find((m) => m.id === memberId);
     await runDbAction(
       () => deleteAttendanceFromDb(existing.id),
@@ -748,7 +823,8 @@ export default function App() {
       schedules.filter((s) => s.id === scheduleId),
       members,
       swaps,
-      attendanceRecords
+      attendanceRecords,
+      autoAlfaContext
     )[0];
 
     if (!targetResolved || targetResolved.dutyMembers.length === 0) return;
@@ -759,41 +835,55 @@ export default function App() {
     ).padStart(2, '0')}`;
 
     const recorderName = formatAdminVerifierName(loggedInAccount?.displayName);
+    const isDevAccount = canDeleteViolationData(loggedInAccount);
 
-    const batchPayload: AttendanceRecord[] = targetResolved.dutyMembers.map(
-      (dm) => {
-        const existing = attendanceRecords.find(
-          (r) =>
-            r.date === date &&
-            r.scheduleId === scheduleId &&
-            r.memberId === dm.member.id
-        );
-        return existing
-          ? {
-              ...existing,
-              status: existing.status === 'belum_absen' ? 'hadir' : existing.status,
-              checkInTime:
-                existing.status === 'hadir' ||
-                existing.status === 'terlambat' ||
-                existing.status === 'belum_absen'
-                  ? existing.checkInTime !== '-'
-                    ? existing.checkInTime
-                    : checkInTime
-                  : existing.checkInTime,
-              recordedBy: recorderName,
-            }
-          : {
-              id: `att-${date}-${scheduleId}-${dm.member.id}`,
-              date,
-              scheduleId,
-              memberId: dm.member.id,
-              status: 'hadir',
-              checkInTime,
-              note: 'Terverifikasi hadir',
-              recordedBy: recorderName,
-            };
+    const batchPayload: AttendanceRecord[] = [];
+    for (const dm of targetResolved.dutyMembers) {
+      const existing = attendanceRecords.find(
+        (r) =>
+          r.date === date &&
+          r.scheduleId === scheduleId &&
+          r.memberId === dm.member.id
+      );
+      if (existing) {
+        batchPayload.push({
+          ...existing,
+          status:
+            existing.status === 'belum_absen' ? 'hadir' : existing.status,
+          checkInTime:
+            existing.status === 'hadir' ||
+            existing.status === 'terlambat' ||
+            existing.status === 'belum_absen'
+              ? existing.checkInTime !== '-'
+                ? existing.checkInTime
+                : checkInTime
+              : existing.checkInTime,
+          recordedBy: recorderName,
+        });
+      } else {
+        // Non-developer Admin cannot overwrite Auto-Alfa slots into Hadir
+        if (dm.isAutoAlfa && !isDevAccount) {
+          continue;
+        }
+        batchPayload.push({
+          id: `att-${date}-${scheduleId}-${dm.member.id}`,
+          date,
+          scheduleId,
+          memberId: dm.member.id,
+          status: 'hadir',
+          checkInTime,
+          note: 'Terverifikasi hadir',
+          recordedBy: recorderName,
+        });
       }
-    );
+    }
+
+    if (batchPayload.length === 0) {
+      showToast(
+        'Slot yang sudah Otomatis Alfa dilindungi dan tidak dapat diubah menjadi Hadir oleh Admin.'
+      );
+      return;
+    }
 
     await runDbAction(
       () => saveBatchAttendanceToDb(batchPayload),
@@ -839,6 +929,12 @@ export default function App() {
       );
       for (const res of resolvedList) {
         for (const dm of res.dutyMembers) {
+          if (
+            !canDeleteViolationData(loggedInAccount) &&
+            isViolationAttendanceRecord(dm.attendance)
+          ) {
+            continue;
+          }
           batchPayload.push({
             id: `att-${date}-${res.schedule.id}-${dm.member.id}`,
             date,
@@ -1082,6 +1178,15 @@ export default function App() {
   };
 
   const handleDeleteMember = async (memberId: string) => {
+    const hasViolation = attendanceRecords.some(
+      (r) => r.memberId === memberId && isViolationAttendanceRecord(r)
+    );
+    if (hasViolation && !canDeleteViolationData(loggedInAccount)) {
+      showToast(
+        'Anggota yang memiliki catatan pelanggaran tidak dapat dihapus oleh Admin (khusus Developer).'
+      );
+      return;
+    }
     await runDbAction(
       () => deleteMemberFromDb(memberId),
       'Data anggota berhasil dihapus dari database.'
@@ -1117,6 +1222,69 @@ export default function App() {
       `Akun Admin "@${target.username}" berhasil dihapus.`
     );
   };
+
+  // Developer-Only Database Maintenance Handlers
+  const handleClearViolationDatabase = async () => {
+    if (!canDeleteViolationData(loggedInAccount)) {
+      showToast('Hanya role Developer yang dapat menghapus database pelanggaran.');
+      return;
+    }
+    const now = new Date();
+    const nowHHMM = `${String(now.getHours()).padStart(2, '0')}:${String(
+      now.getMinutes()
+    ).padStart(2, '0')}`;
+    const recorderName = formatAdminVerifierName(loggedInAccount?.displayName);
+    let deletedCount = 0;
+    const ok = await runDbAction(async () => {
+      const res = await clearViolationDatabaseInDb(
+        recorderName,
+        todayStr,
+        nowHHMM
+      );
+      deletedCount = res.deletedCount;
+    });
+    if (ok) {
+      showToast(
+        `Database pelanggaran dibersihkan (${deletedCount} catatan dihapus, poin leaderboard direset ke 0). Akun petugas & admin tetap aman.`
+      );
+    }
+  };
+
+  const handleResetAllDatabaseData = async () => {
+    if (!canDeleteViolationData(loggedInAccount)) {
+      showToast('Hanya role Developer yang dapat mereset seluruh database.');
+      return;
+    }
+    const now = new Date();
+    const nowHHMM = `${String(now.getHours()).padStart(2, '0')}:${String(
+      now.getMinutes()
+    ).padStart(2, '0')}`;
+    const recorderName = formatAdminVerifierName(loggedInAccount?.displayName);
+    let summaryCounts = {
+      deletedAttendance: 0,
+      deletedSwaps: 0,
+      deletedAccounts: 0,
+    };
+    const ok = await runDbAction(async () => {
+      summaryCounts = await resetAllDatabaseDataInDb(
+        recorderName,
+        todayStr,
+        nowHHMM,
+        INITIAL_OSIS_MEMBERS,
+        createInitialSchedules(todayStr)
+      );
+    });
+    if (ok) {
+      showToast(
+        `Reset total selesai: ${summaryCounts.deletedAttendance} data absensi/pelanggaran, ${summaryCounts.deletedSwaps} tukar jadwal, dan ${summaryCounts.deletedAccounts} akun admin/petugas telah direset.`
+      );
+    }
+  };
+
+  const violationRecordsCount = getViolationRecordIdsToClear(
+    attendanceRecords
+  ).length;
+  const violationResetCutoff = getViolationResetCutoff(attendanceRecords);
 
   const isAdminView = activeTab !== 'display' && Boolean(loggedInAccount);
   const isDeveloper = canManageAdminAccounts(loggedInAccount);
@@ -1175,7 +1343,7 @@ export default function App() {
                         : 'text-stone-600 hover:text-stone-900 hover:bg-stone-100'
                     }`}
                   >
-                    Kelola Akun
+                    Panel Developer
                   </button>
                 )}
               </nav>
@@ -1247,7 +1415,7 @@ export default function App() {
                     : 'text-stone-600 hover:bg-stone-100'
                 }`}
               >
-                Akun
+                Developer
               </button>
             )}
           </nav>
@@ -1298,6 +1466,7 @@ export default function App() {
 
         {isAdminView && activeTab === 'admin_attendance' && (
           <LiveDisplayAndAttendance
+            currentAccount={loggedInAccount}
             todayStr={todayStr}
             selectedDate={selectedDate}
             onSelectDate={setSelectedDate}
@@ -1379,9 +1548,13 @@ export default function App() {
           <DeveloperAccountManager
             currentAccount={loggedInAccount}
             accounts={accounts}
+            violationRecordsCount={violationRecordsCount}
+            violationResetCutoff={violationResetCutoff}
             onAddAdminAccount={handleAddAdminAccount}
             onUpdateAccount={handleUpdateAdminAccount}
             onDeleteAdminAccount={(acc) => handleDeleteAdminAccount(acc.id)}
+            onClearViolationDatabase={handleClearViolationDatabase}
+            onResetAllDatabaseData={handleResetAllDatabaseData}
           />
         )}
       </main>

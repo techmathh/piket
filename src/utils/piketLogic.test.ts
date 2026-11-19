@@ -1291,6 +1291,219 @@ test('toggles Violation Leaderboard visibility setting and filters metadata reco
   assert.equal(isSystemMetadataAttendanceRecord(normalRec), false);
 });
 
+test('protects violation records from deletion or downgrade by Admin and public officers (only Developer allowed)', async () => {
+  const {
+    PERMANENT_DEVELOPER_ACCOUNT,
+    PUBLIC_SELF_ATTENDANCE_RECORDER,
+    canAccountModifyViolationRecord,
+    canDeleteViolationData,
+    canPublicEditAttendanceRecord,
+    getViolationRecordIdsToClear,
+    isViolationAttendanceRecord,
+  } = await import('./piketLogic');
+
+  const regularAdmin = {
+    id: 'acc-admin-test',
+    username: 'adminosis',
+    password: 'secret',
+    displayName: 'Admin Piket OSIS',
+    role: 'admin' as const,
+    isProtected: false,
+    createdAt: '2026-11-01T00:00:00.000Z',
+  };
+
+  assert.equal(canDeleteViolationData(PERMANENT_DEVELOPER_ACCOUNT), true);
+  assert.equal(canDeleteViolationData(regularAdmin), false);
+  assert.equal(canDeleteViolationData(null), false);
+
+  const hadirRec: AttendanceRecord = {
+    id: 'att-hadir',
+    date: '2026-11-19',
+    scheduleId: 'sch-1',
+    memberId: 'm1',
+    status: 'hadir',
+    checkInTime: '06:30',
+    note: 'Hadir tepat waktu',
+    recordedBy: PUBLIC_SELF_ATTENDANCE_RECORDER,
+  };
+  const alfaRec: AttendanceRecord = {
+    id: 'att-alfa',
+    date: '2026-11-19',
+    scheduleId: 'sch-1',
+    memberId: 'm2',
+    status: 'tidak_piket',
+    checkInTime: '-',
+    note: 'Alfa (tidak melaksanakan piket)',
+    recordedBy: PUBLIC_SELF_ATTENDANCE_RECORDER,
+  };
+  const lateGerbangRec: AttendanceRecord = {
+    id: 'att-late',
+    date: '2026-11-19',
+    scheduleId: 'sch-1',
+    memberId: 'm3',
+    status: 'terlambat',
+    checkInTime: '07:10',
+    note: 'Melebihi toleransi jaga gerbang 06:45 WIB (absen 07:10 WIB)',
+    recordedBy: PUBLIC_SELF_ATTENDANCE_RECORDER,
+  };
+  const warsisFirstSessionRec: AttendanceRecord = {
+    id: 'att-warsis-1x',
+    date: '2026-11-19',
+    scheduleId: 'sch-warsis',
+    memberId: 'm1',
+    status: 'terlambat',
+    checkInTime: '09:20',
+    note: 'Baru jaga 1× (Istirahat Pertama (09:15 WIB)) — wajib 2×',
+    recordedBy: PUBLIC_SELF_ATTENDANCE_RECORDER,
+  };
+
+  assert.equal(isViolationAttendanceRecord(hadirRec), false);
+  assert.equal(isViolationAttendanceRecord(alfaRec), true);
+  assert.equal(isViolationAttendanceRecord(lateGerbangRec), true);
+  assert.deepEqual(
+    getViolationRecordIdsToClear([hadirRec, alfaRec, lateGerbangRec]),
+    ['att-alfa', 'att-late']
+  );
+
+  // Public officer cannot edit/erase Alfa or Gerbang Terlambat, but CAN complete 2nd session of Warsis 1x
+  assert.equal(
+    canPublicEditAttendanceRecord(alfaRec, 'Jadwal Jaga Gerbang').allowed,
+    false
+  );
+  assert.equal(
+    canPublicEditAttendanceRecord(lateGerbangRec, 'Jadwal Jaga Gerbang').allowed,
+    false
+  );
+  assert.equal(
+    canPublicEditAttendanceRecord(warsisFirstSessionRec, 'Jadwal Piket Warsis')
+      .allowed,
+    true
+  );
+
+  // Regular Admin CANNOT downgrade violation to Hadir/Izin, but CAN verify/escalate Terlambat -> Alfa
+  assert.equal(
+    canAccountModifyViolationRecord(regularAdmin, alfaRec, 'hadir', false)
+      .allowed,
+    false
+  );
+  assert.equal(
+    canAccountModifyViolationRecord(regularAdmin, lateGerbangRec, 'izin', false)
+      .allowed,
+    false
+  );
+  assert.equal(
+    canAccountModifyViolationRecord(
+      regularAdmin,
+      lateGerbangRec,
+      'tidak_piket',
+      true
+    ).allowed,
+    true
+  );
+
+  // Developer CAN modify or clear any violation record
+  assert.equal(
+    canAccountModifyViolationRecord(
+      PERMANENT_DEVELOPER_ACCOUNT,
+      alfaRec,
+      'hadir',
+      false
+    ).allowed,
+    true
+  );
+});
+
+test('clears historical Auto-Alfa and resets Violation Leaderboard to 0 after Developer violation database reset cutoff', async () => {
+  const {
+    calculateViolationLeaderboard,
+    createViolationResetCutoffRecord,
+    getViolationResetCutoff,
+    isAutoAlfaSlot,
+    isSystemMetadataAttendanceRecord,
+  } = await import('./piketLogic');
+
+  const gerbangShift: PiketSchedule = {
+    ...dailySchedule,
+    id: 'sch-gerbang-reset-test',
+    title: 'Jadwal Jaga Gerbang',
+    startTime: '06:00',
+    endTime: '09:15',
+    activeWeeks: [1, 2, 3, 4],
+    activeDays: [1, 2, 3, 4, 5],
+    dailyMembers: ['m1'],
+  };
+
+  // Before reset: on Thu 2026-11-19 at 15:00, Mon–Thu have Auto-Alfa (4 * 2 = 8 points)
+  const beforeBoard = calculateViolationLeaderboard(
+    'mingguan',
+    '2026-11-19',
+    [gerbangShift],
+    sampleMembers,
+    [],
+    [],
+    { todayStr: '2026-11-19', currentTimeHHMM: '15:00' }
+  );
+  assert.equal(beforeBoard.totalViolators, 1);
+  assert.equal(beforeBoard.totalPoints, 8);
+
+  // Developer triggers Option 1 (Clear Violation Database) at 15:00 on 2026-11-19
+  const cutoffRec = createViolationResetCutoffRecord(
+    '2026-11-19',
+    '15:00',
+    'Verifikasi Admin: Developer Sistem OSIS'
+  );
+  assert.equal(isSystemMetadataAttendanceRecord(cutoffRec), true);
+  const parsedCutoff = getViolationResetCutoff([cutoffRec]);
+  assert.equal(parsedCutoff?.resetDate, '2026-11-19');
+  assert.equal(parsedCutoff?.resetTimeHHMM, '15:00');
+
+  // Past days and today's already-ended 09:15 shift are no longer Auto-Alfa
+  assert.equal(
+    isAutoAlfaSlot(
+      '2026-11-18',
+      gerbangShift,
+      { todayStr: '2026-11-19', currentTimeHHMM: '15:00' },
+      [cutoffRec]
+    ),
+    false
+  );
+  assert.equal(
+    isAutoAlfaSlot(
+      '2026-11-19',
+      gerbangShift,
+      { todayStr: '2026-11-19', currentTimeHHMM: '15:00' },
+      [cutoffRec]
+    ),
+    false
+  );
+
+  // Leaderboard immediately drops to 0 violators & 0 points!
+  const afterResetBoard = calculateViolationLeaderboard(
+    'mingguan',
+    '2026-11-19',
+    [gerbangShift],
+    sampleMembers,
+    [],
+    [cutoffRec],
+    { todayStr: '2026-11-19', currentTimeHHMM: '15:00' }
+  );
+  assert.equal(afterResetBoard.totalViolators, 0);
+  assert.equal(afterResetBoard.totalPoints, 0);
+
+  // A NEW violation recorded on 2026-11-20 still counts normally!
+  const nextDayBoard = calculateViolationLeaderboard(
+    'mingguan',
+    '2026-11-20',
+    [gerbangShift],
+    sampleMembers,
+    [],
+    [cutoffRec],
+    { todayStr: '2026-11-20', currentTimeHHMM: '10:00' }
+  );
+  assert.equal(nextDayBoard.totalViolators, 1);
+  assert.equal(nextDayBoard.totalPoints, 2);
+});
+
 
 
 

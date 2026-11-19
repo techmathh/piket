@@ -608,6 +608,21 @@ export function isAutoAlfaSlot(
   if (getHolidayForScheduleOnDate(dateStr, schedule.title, attendanceRecords)) {
     return false;
   }
+
+  // Honor Developer Violation Database Reset cutoff so cleared past Auto-Alfa stays at 0
+  const violationCutoff = getViolationResetCutoff(attendanceRecords);
+  if (violationCutoff) {
+    if (dateStr < violationCutoff.resetDate) {
+      return false;
+    }
+    if (dateStr === violationCutoff.resetDate) {
+      const endHHMM = (schedule.endTime || '23:59').slice(0, 5);
+      if (endHHMM <= violationCutoff.resetTimeHHMM) {
+        return false;
+      }
+    }
+  }
+
   if (dateStr < autoAlfaContext.todayStr) {
     return true;
   }
@@ -2300,6 +2315,8 @@ export function calculateViolationLeaderboard(
 export const APP_SETTING_SCHEDULE_ID = '__APP_SETTING__';
 export const LEADERBOARD_SETTING_MEMBER_ID = '__LEADERBOARD_ENABLED__';
 export const LEADERBOARD_SETTING_RECORD_ID = 'setting-leaderboard-enabled';
+export const VIOLATION_RESET_MEMBER_ID = '__VIOLATION_RESET_CUTOFF__';
+export const VIOLATION_RESET_RECORD_ID = 'setting-violation-reset-cutoff';
 
 /**
  * Identifies internal metadata documents stored in the `attendance` collection
@@ -2312,10 +2329,178 @@ export function isSystemMetadataAttendanceRecord(
     record.memberId === DAY_NOTE_MEMBER_ID ||
     record.memberId === HOLIDAY_RANGE_MEMBER_ID ||
     record.memberId === LEADERBOARD_SETTING_MEMBER_ID ||
+    record.memberId === VIOLATION_RESET_MEMBER_ID ||
     record.scheduleId === APP_SETTING_SCHEDULE_ID ||
     record.scheduleId === DAY_NOTE_SCHEDULE_ID ||
     record.scheduleId.startsWith(HOLIDAY_CATEGORY_PREFIX)
   );
+}
+
+/**
+ * Returns whether an AttendanceRecord represents a disciplinary violation
+ * (Alfa / tidak_piket, Terlambat, or flagged "Dia bohong").
+ */
+export function isViolationAttendanceRecord(
+  record: AttendanceRecord | null
+): boolean {
+  if (!record || isSystemMetadataAttendanceRecord(record)) return false;
+  return (
+    record.status === 'tidak_piket' ||
+    record.status === 'terlambat' ||
+    isFakeAttendanceRecord(record)
+  );
+}
+
+/**
+ * Only the Developer role is permitted to delete or reset violation data.
+ * Regular Admin accounts and public officers (petugas) cannot delete violation records.
+ */
+export function canDeleteViolationData(
+  account: AppAccount | null | undefined
+): boolean {
+  return Boolean(account && account.role === 'developer');
+}
+
+/**
+ * Checks whether a public user (petugas) may overwrite an existing attendance record.
+ * Blocks erasing/changing existing violation records (except legitimate 1x -> 2x completion
+ * for unverified Warsis / Shalat multi-session check-ins).
+ */
+export function canPublicEditAttendanceRecord(
+  existing: AttendanceRecord | null,
+  scheduleTitle: string
+): { allowed: boolean; reason?: string } {
+  if (!existing) return { allowed: true };
+
+  if (isAttendanceVerifiedByAdmin(existing)) {
+    return {
+      allowed: false,
+      reason:
+        'Status absensi sudah diverifikasi oleh Admin dan tidak dapat diubah secara publik.',
+    };
+  }
+
+  if (isViolationAttendanceRecord(existing)) {
+    const posRule = getPosRuleInfo(scheduleTitle);
+    const isPendingSecondSession =
+      Boolean(posRule.requiredSessions && posRule.requiredSessions.length >= 2) &&
+      existing.status === 'terlambat' &&
+      !isFakeAttendanceRecord(existing) &&
+      existing.note.toLowerCase().includes('baru jaga 1×');
+
+    if (isPendingSecondSession) {
+      return { allowed: true };
+    }
+
+    return {
+      allowed: false,
+      reason:
+        'Data pelanggaran (Terlambat / Alfa) dikunci demi keamanan dan tidak dapat dihapus atau diubah oleh petugas.',
+    };
+  }
+
+  return { allowed: true };
+}
+
+/**
+ * Checks whether an authenticated Admin/Developer account can modify an existing record
+ * to `targetStatus` / `targetIsFake`.
+ * - Developer: full access.
+ * - Admin: may confirm/verify or escalate a violation (e.g. Terlambat -> Alfa / Dia Bohong),
+ *   but CANNOT downgrade/erase an existing violation into Hadir, Izin, Sakit, or Belum Absen.
+ */
+export function canAccountModifyViolationRecord(
+  account: AppAccount | null | undefined,
+  existing: AttendanceRecord | null,
+  targetStatus: AttendanceStatus,
+  targetIsFake = false
+): { allowed: boolean; reason?: string } {
+  if (canDeleteViolationData(account)) {
+    return { allowed: true };
+  }
+
+  if (existing && isViolationAttendanceRecord(existing)) {
+    const targetRemainsViolation =
+      targetStatus === 'tidak_piket' ||
+      targetStatus === 'terlambat' ||
+      targetIsFake;
+
+    if (!targetRemainsViolation) {
+      return {
+        allowed: false,
+        reason:
+          'Data pelanggaran dilindungi. Admin tidak dapat menghapus atau mengubah pelanggaran menjadi Hadir/Izin (khusus Developer).',
+      };
+    }
+  }
+
+  return { allowed: true };
+}
+
+/**
+ * Returns IDs of all explicit member violation records stored in `attendanceRecords`.
+ */
+export function getViolationRecordIdsToClear(
+  attendanceRecords: AttendanceRecord[]
+): string[] {
+  return attendanceRecords
+    .filter((r) => isViolationAttendanceRecord(r))
+    .map((r) => r.id);
+}
+
+export interface ViolationResetCutoff {
+  resetDate: string; // YYYY-MM-DD
+  resetTimeHHMM: string; // HH:mm
+  recordedBy: string;
+}
+
+/**
+ * Reads the persisted Developer Violation Database Reset cutoff (if any).
+ */
+export function getViolationResetCutoff(
+  attendanceRecords: AttendanceRecord[]
+): ViolationResetCutoff | null {
+  const setting = attendanceRecords.find(
+    (r) =>
+      r.id === VIOLATION_RESET_RECORD_ID ||
+      (r.scheduleId === APP_SETTING_SCHEDULE_ID &&
+        r.memberId === VIOLATION_RESET_MEMBER_ID)
+  );
+  if (!setting || !/^\d{4}-\d{2}-\d{2}$/.test(setting.date)) {
+    return null;
+  }
+  const timeMatch = /^\d{2}:\d{2}$/.test(setting.checkInTime)
+    ? setting.checkInTime
+    : '23:59';
+  return {
+    resetDate: setting.date,
+    resetTimeHHMM: timeMatch,
+    recordedBy: setting.recordedBy,
+  };
+}
+
+/**
+ * Builds a valid Firestore AttendanceRecord storing the Developer Violation Reset cutoff timestamp.
+ */
+export function createViolationResetCutoffRecord(
+  resetDate: string,
+  resetTimeHHMM: string,
+  recordedBy: string
+): AttendanceRecord {
+  const cleanDate = resetDate.slice(0, 10);
+  const cleanTime = /^\d{2}:\d{2}$/.test(resetTimeHHMM.slice(0, 5))
+    ? resetTimeHHMM.slice(0, 5)
+    : '23:59';
+  return {
+    id: VIOLATION_RESET_RECORD_ID,
+    date: cleanDate,
+    scheduleId: APP_SETTING_SCHEDULE_ID,
+    memberId: VIOLATION_RESET_MEMBER_ID,
+    status: 'hadir',
+    checkInTime: cleanTime,
+    note: `Reset database pelanggaran pada ${cleanDate} ${cleanTime} WIB`,
+    recordedBy: (recordedBy || 'Verifikasi Admin: Developer Utama').slice(0, 120),
+  };
 }
 
 /**

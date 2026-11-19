@@ -27,6 +27,8 @@ import {
   addDays,
   buildAdminVerificationNote,
   calculateShiftCheckInProgress,
+  canAccountModifyViolationRecord,
+  canDeleteViolationData,
   formatFullDateId,
   formatSelfAttendanceClaim,
   formatShortDateRangeId,
@@ -41,7 +43,9 @@ import {
   isAttendanceVerifiedByAdmin,
   isFakeAttendanceRecord,
   isPublicSelfAttendance,
+  isViolationAttendanceRecord,
   parseLieAttendanceRecord,
+  type AppAccount,
   type AttendanceRecord,
   type AttendanceStatus,
   type HolidayCategory,
@@ -56,6 +60,7 @@ import {
 } from '../utils/pdfExporter';
 
 interface LiveDisplayAndAttendanceProps {
+  currentAccount: AppAccount | null;
   todayStr: string;
   selectedDate: string;
   onSelectDate: (dateStr: string) => void;
@@ -110,6 +115,7 @@ type VerificationFilter = 'all' | 'pending_verify' | 'fake' | 'belum_absen';
 export const LiveDisplayAndAttendance: React.FC<
   LiveDisplayAndAttendanceProps
 > = ({
+  currentAccount,
   todayStr,
   selectedDate,
   onSelectDate,
@@ -126,6 +132,7 @@ export const LiveDisplayAndAttendance: React.FC<
   onDeleteHolidayRange,
   onOpenSwapModal,
 }) => {
+  const canDeleteViolations = canDeleteViolationData(currentAccount);
   const [currentTime, setCurrentTime] = useState<string>('07:00:00');
   const [scheduleFilter, setScheduleFilter] = useState<string>('all');
   const [verifyFilter, setVerifyFilter] = useState<VerificationFilter>('all');
@@ -341,6 +348,9 @@ export const LiveDisplayAndAttendance: React.FC<
   ) => {
     if (!dateEditStatus.canEdit) return;
 
+    const isViolationRow =
+      isViolationAttendanceRecord(dm.attendance) || dm.isAutoAlfa;
+
     const alreadySelectedByAdmin =
       Boolean(dm.attendance) &&
       isAttendanceVerifiedByAdmin(dm.attendance) &&
@@ -348,7 +358,26 @@ export const LiveDisplayAndAttendance: React.FC<
       !isFakeAttendanceRecord(dm.attendance);
 
     if (alreadySelectedByAdmin) {
+      if (!canDeleteViolations && isViolationRow) {
+        return;
+      }
       onClearAttendance(selectedDate, scheduleId, dm.member.id);
+      return;
+    }
+
+    const perm = canAccountModifyViolationRecord(
+      currentAccount,
+      dm.attendance,
+      status,
+      false
+    );
+    if (!perm.allowed) return;
+    if (
+      !canDeleteViolations &&
+      dm.isAutoAlfa &&
+      status !== 'tidak_piket' &&
+      status !== 'terlambat'
+    ) {
       return;
     }
 
@@ -372,6 +401,9 @@ export const LiveDisplayAndAttendance: React.FC<
     dm: ResolvedDutyMember
   ) => {
     if (!dateEditStatus.canEdit || !dm.attendance) return;
+    if (!canDeleteViolations && isViolationAttendanceRecord(dm.attendance)) {
+      return;
+    }
     onClearAttendance(selectedDate, scheduleId, dm.member.id);
     if (editingRowKey === `${scheduleId}:${dm.member.id}`) {
       setEditingRowKey(null);
@@ -1168,6 +1200,11 @@ export const LiveDisplayAndAttendance: React.FC<
                       const lieInfo = parseLieAttendanceRecord(dm.attendance);
                       const isFake = lieInfo.isLie;
                       const orgLabel = getMemberOrgLabel(dm.member);
+                      const isViolationRow =
+                        isViolationAttendanceRecord(dm.attendance) ||
+                        dm.isAutoAlfa;
+                      const isViolationLockedForAdmin =
+                        isViolationRow && !canDeleteViolations;
 
                       return (
                         <div
@@ -1305,10 +1342,15 @@ export const LiveDisplayAndAttendance: React.FC<
                                         isVerified &&
                                         dm.effectiveStatus === btn.id &&
                                         !isFake;
+                                      const isBlockedForAdmin =
+                                        isViolationLockedForAdmin &&
+                                        (btn.id === 'hadir' ||
+                                          btn.id === 'izin');
                                       return (
                                         <button
                                           key={btn.id}
                                           type="button"
+                                          disabled={isBlockedForAdmin}
                                           data-testid={`btn-admin-direct-${btn.id}-${dm.member.id}`}
                                           onClick={() =>
                                             handleDirectAdminAttendance(
@@ -1318,13 +1360,19 @@ export const LiveDisplayAndAttendance: React.FC<
                                             )
                                           }
                                           className={`px-2 py-1 text-[11px] font-semibold rounded-md transition-colors whitespace-nowrap ${
-                                            isSelected
+                                            isBlockedForAdmin
+                                              ? 'text-stone-300 cursor-not-allowed'
+                                              : isSelected
                                               ? btn.active
                                               : 'text-stone-600 hover:text-stone-900 hover:bg-white'
                                           }`}
                                           title={
-                                            isSelected
-                                              ? `Klik lagi untuk membatalkan tanda ${btn.label}`
+                                            isBlockedForAdmin
+                                              ? 'Data pelanggaran dilindungi dan hanya dapat diubah ke Hadir/Izin oleh Developer'
+                                              : isSelected
+                                              ? isViolationLockedForAdmin
+                                                ? 'Status pelanggaran terkunci (hanya Developer yang dapat membatalkan)'
+                                                : `Klik lagi untuk membatalkan tanda ${btn.label}`
                                               : `Absen langsung ${btn.label} oleh Admin (tanpa perlu verifikasi)`
                                           }
                                         >
@@ -1334,7 +1382,7 @@ export const LiveDisplayAndAttendance: React.FC<
                                     })}
                                   </div>
 
-                                  {dm.attendance && (
+                                  {dm.attendance && !isViolationLockedForAdmin && (
                                     <button
                                       type="button"
                                       data-testid={`btn-admin-cancel-attendance-${dm.member.id}`}
@@ -1348,6 +1396,17 @@ export const LiveDisplayAndAttendance: React.FC<
                                       <RotateCcw className="w-3 h-3" />
                                       <span>Batal</span>
                                     </button>
+                                  )}
+
+                                  {isViolationLockedForAdmin && (
+                                    <span
+                                      data-testid={`badge-violation-locked-${dm.member.id}`}
+                                      title="Data pelanggaran dilindungi dan hanya dapat dihapus oleh Developer"
+                                      className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold rounded-md border border-rose-200 bg-rose-50 text-rose-700 whitespace-nowrap"
+                                    >
+                                      <Lock className="w-3 h-3" />
+                                      <span>Pelanggaran Terkunci</span>
+                                    </span>
                                   )}
 
                                   {isPendingVerify && (
@@ -1503,6 +1562,17 @@ export const LiveDisplayAndAttendance: React.FC<
                                 <span className="block text-[11px] font-bold text-stone-600 uppercase tracking-wide">
                                   Atau Pilih Status Verifikasi Manual
                                 </span>
+                                {isViolationLockedForAdmin && (
+                                  <p className="text-[11px] text-rose-700 bg-rose-50 border border-rose-200 rounded-md px-2.5 py-1.5 flex items-center gap-1.5">
+                                    <Lock className="w-3.5 h-3.5 shrink-0" />
+                                    <span>
+                                      Data pelanggaran dilindungi: Admin tidak
+                                      dapat menghapus atau mengubah status
+                                      pelanggaran menjadi Hadir/Izin (khusus
+                                      Developer).
+                                    </span>
+                                  </p>
+                                )}
                                 <div className="flex flex-wrap gap-1.5">
                                   {(
                                     [
@@ -1511,20 +1581,28 @@ export const LiveDisplayAndAttendance: React.FC<
                                       { id: 'izin', label: 'Izin' },
                                       { id: 'tidak_piket', label: 'Alfa' },
                                     ] as const
-                                  ).map((st) => (
-                                    <button
-                                      key={st.id}
-                                      type="button"
-                                      onClick={() => setDraftStatus(st.id)}
-                                      className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
-                                        draftStatus === st.id
-                                          ? 'bg-stone-900 border-stone-900 text-white'
-                                          : 'bg-white border-stone-200 text-stone-700 hover:bg-stone-100'
-                                      }`}
-                                    >
-                                      {st.label}
-                                    </button>
-                                  ))}
+                                  ).map((st) => {
+                                    const isDisabledOption =
+                                      isViolationLockedForAdmin &&
+                                      (st.id === 'hadir' || st.id === 'izin');
+                                    return (
+                                      <button
+                                        key={st.id}
+                                        type="button"
+                                        disabled={isDisabledOption}
+                                        onClick={() => setDraftStatus(st.id)}
+                                        className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
+                                          isDisabledOption
+                                            ? 'bg-stone-100 border-stone-200 text-stone-400 cursor-not-allowed'
+                                            : draftStatus === st.id
+                                            ? 'bg-stone-900 border-stone-900 text-white'
+                                            : 'bg-white border-stone-200 text-stone-700 hover:bg-stone-100'
+                                        }`}
+                                      >
+                                        {st.label}
+                                      </button>
+                                    );
+                                  })}
                                 </div>
 
                                 <div className="flex flex-col sm:flex-row sm:items-center gap-2">
@@ -1552,21 +1630,22 @@ export const LiveDisplayAndAttendance: React.FC<
 
                                 <div className="flex flex-wrap items-center justify-between gap-2">
                                   <div>
-                                    {dm.attendance && (
-                                      <button
-                                        type="button"
-                                        onClick={() =>
-                                          handleCancelAttendance(
-                                            schedule.id,
-                                            dm
-                                          )
-                                        }
-                                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700"
-                                      >
-                                        <RotateCcw className="w-3.5 h-3.5" />
-                                        <span>Hapus Tanda Absen</span>
-                                      </button>
-                                    )}
+                                    {dm.attendance &&
+                                      !isViolationLockedForAdmin && (
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            handleCancelAttendance(
+                                              schedule.id,
+                                              dm
+                                            )
+                                          }
+                                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700"
+                                        >
+                                          <RotateCcw className="w-3.5 h-3.5" />
+                                          <span>Hapus Tanda Absen</span>
+                                        </button>
+                                      )}
                                   </div>
                                   <div className="flex items-center gap-2">
                                     <button

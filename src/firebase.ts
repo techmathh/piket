@@ -21,6 +21,8 @@ import {
 import {
   PERMANENT_DEVELOPER_ACCOUNT,
   canDeleteAccount,
+  createViolationResetCutoffRecord,
+  isViolationAttendanceRecord,
   sanitizeScheduleForDb,
   type AppAccount,
   type AttendanceRecord,
@@ -455,6 +457,159 @@ export async function syncOfficialScheduleTimeWindowsIfLegacy(
   } catch (err) {
     console.error('Failed to sync official schedule time windows:', err);
     return false;
+  }
+}
+
+async function commitChunkedDeletes(
+  collectionName: string,
+  docIds: string[]
+): Promise<void> {
+  const CHUNK_SIZE = 400;
+  for (let i = 0; i < docIds.length; i += CHUNK_SIZE) {
+    const chunk = docIds.slice(i, i + CHUNK_SIZE);
+    const batch = writeBatch(db);
+    for (const id of chunk) {
+      batch.delete(doc(db, collectionName, id));
+    }
+    await batch.commit();
+  }
+}
+
+/**
+ * Developer-only Option 1:
+ * Deletes all violation attendance records (Alfa / Terlambat / Dia Bohong) from Firestore
+ * and writes a reset cutoff timestamp so past Auto-Alfa entries reset cleanly to 0.
+ * Preserves Admin/Petugas accounts, members, schedules, swaps, holidays, and non-violation attendance.
+ */
+export async function clearViolationDatabaseInDb(
+  recordedBy: string,
+  resetDate: string,
+  resetTimeHHMM: string
+): Promise<{ deletedCount: number }> {
+  try {
+    const attSnap = await getDocsFromServer(collection(db, 'attendance'));
+    const violationIds: string[] = [];
+    attSnap.forEach((docSnap) => {
+      const rec = docSnap.data() as AttendanceRecord;
+      if (isViolationAttendanceRecord(rec)) {
+        violationIds.push(docSnap.id);
+      }
+    });
+
+    if (violationIds.length > 0) {
+      await commitChunkedDeletes('attendance', violationIds);
+    }
+
+    const cutoffRecord = createViolationResetCutoffRecord(
+      resetDate,
+      resetTimeHHMM,
+      recordedBy
+    );
+    await setDoc(doc(db, 'attendance', cutoffRecord.id), cutoffRecord);
+
+    return { deletedCount: violationIds.length };
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, 'clear_violation_database');
+  }
+}
+
+/**
+ * Developer-only Option 2:
+ * Full factory reset — deletes all attendance/violation records, swaps, holidays,
+ * AND all Admin/Petugas login accounts (except the permanent Developer account),
+ * then restores clean default members & schedules with a fresh violation reset cutoff.
+ */
+export async function resetAllDatabaseDataInDb(
+  recordedBy: string,
+  resetDate: string,
+  resetTimeHHMM: string,
+  defaultMembers: OsisMember[],
+  defaultSchedules: PiketSchedule[]
+): Promise<{
+  deletedAttendance: number;
+  deletedSwaps: number;
+  deletedAccounts: number;
+}> {
+  try {
+    const [attSnap, swapsSnap, accountsSnap, membersSnap, schedulesSnap] =
+      await Promise.all([
+        getDocsFromServer(collection(db, 'attendance')),
+        getDocsFromServer(collection(db, 'swaps')),
+        getDocsFromServer(collection(db, 'accounts')),
+        getDocsFromServer(collection(db, 'members')),
+        getDocsFromServer(collection(db, 'schedules')),
+      ]);
+
+    const attIds: string[] = [];
+    attSnap.forEach((d) => attIds.push(d.id));
+
+    const swapIds: string[] = [];
+    swapsSnap.forEach((d) => swapIds.push(d.id));
+
+    const deletableAccountIds: string[] = [];
+    accountsSnap.forEach((d) => {
+      const acc = d.data() as AppAccount;
+      if (canDeleteAccount(acc) && d.id !== PERMANENT_DEVELOPER_ACCOUNT.id) {
+        deletableAccountIds.push(d.id);
+      }
+    });
+
+    const defaultMemberIds = new Set(defaultMembers.map((m) => m.id));
+    const extraMemberIds: string[] = [];
+    membersSnap.forEach((d) => {
+      if (!defaultMemberIds.has(d.id)) extraMemberIds.push(d.id);
+    });
+
+    const defaultScheduleIds = new Set(defaultSchedules.map((s) => s.id));
+    const extraScheduleIds: string[] = [];
+    schedulesSnap.forEach((d) => {
+      if (!defaultScheduleIds.has(d.id)) extraScheduleIds.push(d.id);
+    });
+
+    if (attIds.length > 0) await commitChunkedDeletes('attendance', attIds);
+    if (swapIds.length > 0) await commitChunkedDeletes('swaps', swapIds);
+    if (deletableAccountIds.length > 0) {
+      await commitChunkedDeletes('accounts', deletableAccountIds);
+    }
+    if (extraMemberIds.length > 0) {
+      await commitChunkedDeletes('members', extraMemberIds);
+    }
+    if (extraScheduleIds.length > 0) {
+      await commitChunkedDeletes('schedules', extraScheduleIds);
+    }
+
+    // Restore clean baseline members, official schedules, and fresh violation cutoff
+    const batch = writeBatch(db);
+    for (const m of defaultMembers) {
+      const cleanMember: OsisMember = {
+        id: String(m.id),
+        name: String(m.name).slice(0, 120),
+        kelas: String(m.kelas).slice(0, 60),
+        jabatan: String(m.jabatan).slice(0, 120),
+        phone: String(m.phone || '-').slice(0, 50),
+        active: Boolean(m.active),
+      };
+      batch.set(doc(db, 'members', cleanMember.id), cleanMember);
+    }
+    for (const s of defaultSchedules) {
+      const cleanSchedule = sanitizeScheduleForDb(s);
+      batch.set(doc(db, 'schedules', cleanSchedule.id), cleanSchedule);
+    }
+    const cutoffRecord = createViolationResetCutoffRecord(
+      resetDate,
+      resetTimeHHMM,
+      recordedBy
+    );
+    batch.set(doc(db, 'attendance', cutoffRecord.id), cutoffRecord);
+    await batch.commit();
+
+    return {
+      deletedAttendance: attIds.length,
+      deletedSwaps: swapIds.length,
+      deletedAccounts: deletableAccountIds.length,
+    };
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, 'reset_all_database_data');
   }
 }
 
