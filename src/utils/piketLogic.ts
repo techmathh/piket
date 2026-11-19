@@ -87,6 +87,12 @@ export interface ResolvedDutyMember {
   swapId?: string;
   attendance: AttendanceRecord | null;
   effectiveStatus: AttendanceStatus;
+  isAutoAlfa?: boolean;
+}
+
+export interface AutoAlfaContext {
+  todayStr: string;
+  currentTimeHHMM: string;
 }
 
 export interface ResolvedScheduleForDate {
@@ -208,11 +214,11 @@ export const DAY_NAMES_ID: Record<number, string> = {
 };
 
 export const STATUS_LABELS_ID: Record<AttendanceStatus, string> = {
-  hadir: 'Piket / Hadir',
+  hadir: 'Hadir',
   terlambat: 'Terlambat',
   izin: 'Izin',
   sakit: 'Sakit',
-  tidak_piket: 'Tidak Piket',
+  tidak_piket: 'Alfa',
   belum_absen: 'Belum Absen',
 };
 
@@ -588,15 +594,42 @@ export function sanitizeScheduleForDb(schedule: PiketSchedule): PiketSchedule {
 }
 
 /**
- * Resolves all active schedules for a given date, applying any temporary swaps
- * and attaching attendance records.
+ * Returns true if an unrecorded duty slot should automatically become Alfa (`tidak_piket`):
+ * - Not a holiday for this schedule on `dateStr`, AND
+ * - Either `dateStr < todayStr` (past day), OR (`dateStr === todayStr` and `currentTimeHHMM > schedule.endTime`).
+ */
+export function isAutoAlfaSlot(
+  dateStr: string,
+  schedule: Pick<PiketSchedule, 'title' | 'endTime'>,
+  autoAlfaContext: AutoAlfaContext | undefined,
+  attendanceRecords: AttendanceRecord[]
+): boolean {
+  if (!autoAlfaContext) return false;
+  if (getHolidayForScheduleOnDate(dateStr, schedule.title, attendanceRecords)) {
+    return false;
+  }
+  if (dateStr < autoAlfaContext.todayStr) {
+    return true;
+  }
+  if (dateStr === autoAlfaContext.todayStr) {
+    const nowHHMM = (autoAlfaContext.currentTimeHHMM || '00:00').slice(0, 5);
+    const endHHMM = (schedule.endTime || '23:59').slice(0, 5);
+    return nowHHMM > endHHMM;
+  }
+  return false;
+}
+
+/**
+ * Resolves all active schedules for a given date, applying any temporary swaps,
+ * attaching attendance records, and automatically marking unrecorded ended/past shifts as Alfa.
  */
 export function resolveSchedulesForDate(
   dateStr: string,
   schedules: PiketSchedule[],
   members: OsisMember[],
   swaps: ScheduleSwap[],
-  attendanceRecords: AttendanceRecord[]
+  attendanceRecords: AttendanceRecord[],
+  autoAlfaContext?: AutoAlfaContext
 ): ResolvedScheduleForDate[] {
   const memberMap = new Map<string, OsisMember>();
   for (const m of members) {
@@ -616,6 +649,12 @@ export function resolveSchedulesForDate(
 
     const scheduleSwaps = swaps.filter(
       (s) => s.date === dateStr && s.scheduleId === schedule.id
+    );
+    const autoAlfaActive = isAutoAlfaSlot(
+      dateStr,
+      schedule,
+      autoAlfaContext,
+      attendanceRecords
     );
 
     const dutyMembers: ResolvedDutyMember[] = [];
@@ -644,6 +683,13 @@ export function resolveSchedulesForDate(
             normalizeMemberId(r.memberId) === effectiveMemberId
         ) || null;
 
+      const isAutoAlfa = !attRecord && autoAlfaActive;
+      const effectiveStatus: AttendanceStatus = attRecord
+        ? attRecord.status
+        : isAutoAlfa
+        ? 'tidak_piket'
+        : 'belum_absen';
+
       dutyMembers.push({
         member: memberObj,
         isSwapped: Boolean(activeSwap),
@@ -651,7 +697,8 @@ export function resolveSchedulesForDate(
         swapReason: activeSwap?.reason,
         swapId: activeSwap?.id,
         attendance: attRecord,
-        effectiveStatus: attRecord ? attRecord.status : 'belum_absen',
+        effectiveStatus,
+        isAutoAlfa,
       });
     }
 
@@ -803,7 +850,8 @@ export function calculatePeriodRecap(
   members: OsisMember[],
   swaps: ScheduleSwap[],
   attendanceRecords: AttendanceRecord[],
-  filterScheduleId: string = 'all'
+  filterScheduleId: string = 'all',
+  autoAlfaContext?: AutoAlfaContext
 ): PeriodRecapSummary {
   const dates = getDateRangeStrings(startDate, endDate);
   const activeSchedules =
@@ -850,9 +898,18 @@ export function calculatePeriodRecap(
       activeSchedules,
       members,
       swaps,
-      attendanceRecords
+      attendanceRecords,
+      autoAlfaContext
     );
     for (const res of resolvedList) {
+      const posHoliday = getHolidayForScheduleOnDate(
+        d,
+        res.schedule.title,
+        attendanceRecords
+      );
+      if (posHoliday) {
+        continue;
+      }
       for (const dm of res.dutyMembers) {
         const entry = statsByMember.get(dm.member.id);
         if (!entry) continue;
@@ -1339,6 +1396,967 @@ export function getMemberPersonalSchedules(
 
   return list.sort((a, b) => a.weekNum - b.weekNum);
 }
+
+export type ScheduleDateEditState = 'past' | 'today' | 'future';
+
+export interface ScheduleDateEditStatus {
+  canEdit: boolean;
+  state: ScheduleDateEditState;
+  label: string;
+  reason: string;
+}
+
+/**
+ * Enforces that neither public users nor admins can edit/submit attendance
+ * for dates that have already passed (< todayStr) or have not arrived yet (> todayStr).
+ */
+export function getScheduleDateEditStatus(
+  targetDateStr: string,
+  todayStr: string
+): ScheduleDateEditStatus {
+  if (targetDateStr < todayStr) {
+    return {
+      canEdit: false,
+      state: 'past',
+      label: 'Jadwal Sudah Berlalu',
+      reason:
+        'Jadwal yang sudah berlalu bersifat arsip dan tidak dapat diedit oleh admin maupun pengguna.',
+    };
+  }
+  if (targetDateStr > todayStr) {
+    return {
+      canEdit: false,
+      state: 'future',
+      label: 'Belum Waktunya Jadwal',
+      reason:
+        'Jadwal belum waktunya dilaksanakan. Absensi dan verifikasi hanya dapat dilakukan pada hari H.',
+    };
+  }
+  return {
+    canEdit: true,
+    state: 'today',
+    label: 'Hari Ini (Aktif)',
+    reason: 'Absensi dan verifikasi aktif untuk jadwal hari ini.',
+  };
+}
+
+export type PosRuleCategory = 'gerbang' | 'shalat' | 'warsis' | 'umum';
+
+export interface PosRuleSessionOption {
+  id: string;
+  label: string;
+  timeLabel?: string;
+}
+
+export interface PosRuleInfo {
+  category: PosRuleCategory;
+  shortBadge: string;
+  ruleSummary: string;
+  maxToleranceTime?: string; // e.g. "06:45" for Jaga Gerbang
+  requiredSessions?: PosRuleSessionOption[]; // e.g. 2x for Shalat & Warsis
+}
+
+export const GERBANG_MAX_TOLERANCE_TIME = '06:45';
+
+export const OFFICIAL_POS_TIME_WINDOWS: Record<
+  Exclude<PosRuleCategory, 'umum'>,
+  { startTime: string; endTime: string }
+> = {
+  gerbang: { startTime: '06:00', endTime: '09:15' },
+  warsis: { startTime: '09:15', endTime: '14:15' },
+  shalat: { startTime: '11:45', endTime: '16:00' },
+};
+
+/**
+ * Returns structured attendance rule & tolerance information for a schedule pos:
+ * - Jaga Gerbang: Jam absen 06:00–09:15 WIB; toleransi maks. 06:45 WIB (>06:45 = Terlambat)
+ * - Absensi Shalat: Jam absen 11:45–16:00 WIB; wajib 2x jaga (Dzuhur & Ashar); 1x = Terlambat
+ * - Piket Warsis: Jam absen 09:15–14:15 WIB; wajib 2x jaga (Istirahat 1: 09:15 & Istirahat 2: 11:45); 1x = Terlambat
+ */
+export function getPosRuleInfo(scheduleTitle: string): PosRuleInfo {
+  const lower = (scheduleTitle || '').toLowerCase();
+
+  if (lower.includes('gerbang')) {
+    return {
+      category: 'gerbang',
+      shortBadge: 'Absen 06:00–09:15 · Maks. 06:45',
+      ruleSummary:
+        'Jam absen 06:00–09:15 WIB. Toleransi tepat waktu maksimal pukul 06:45 WIB (melebihi 06:45 otomatis Terlambat).',
+      maxToleranceTime: GERBANG_MAX_TOLERANCE_TIME,
+    };
+  }
+
+  if (lower.includes('shalat') || lower.includes('sholat')) {
+    return {
+      category: 'shalat',
+      shortBadge: 'Absen 11:45–16:00 · Wajib 2×',
+      ruleSummary:
+        'Jam absen 11:45–16:00 WIB. Wajib 2× jaga (Dzuhur & Ashar). Jika hanya 1× jaga maka dihitung Terlambat.',
+      requiredSessions: [
+        { id: 'dzuhur', label: 'Shalat Dzuhur' },
+        { id: 'ashar', label: 'Shalat Ashar' },
+      ],
+    };
+  }
+
+  if (lower.includes('warsis') || lower.includes('wasis')) {
+    return {
+      category: 'warsis',
+      shortBadge: 'Absen 09:15–14:15 · Wajib 2×',
+      ruleSummary:
+        'Jam absen 09:15–14:15 WIB. Wajib 2× jaga: Istirahat Pertama (09:15) & Istirahat Kedua (11:45). Hanya 1× dihitung Terlambat.',
+      requiredSessions: [
+        { id: 'istirahat1', label: 'Istirahat Pertama', timeLabel: '09:15 WIB' },
+        { id: 'istirahat2', label: 'Istirahat Kedua', timeLabel: '11:45 WIB' },
+      ],
+    };
+  }
+
+  return {
+    category: 'umum',
+    shortBadge: 'Sesuai Jam Shift',
+    ruleSummary: 'Hadir tepat waktu sesuai jam absen piket yang ditentukan.',
+  };
+}
+
+export type AttendanceWindowState = 'before' | 'open' | 'closed';
+
+export interface PosAttendanceWindowStatus {
+  isOpen: boolean;
+  state: AttendanceWindowState;
+  startTime: string;
+  endTime: string;
+  windowLabel: string;
+  message: string;
+}
+
+/**
+ * Evaluates whether public self-attendance is currently open for a schedule based on its startTime and endTime.
+ */
+export function getPosAttendanceWindowStatus(
+  schedule: Pick<PiketSchedule, 'title' | 'startTime' | 'endTime'>,
+  currentTimeHHMM: string
+): PosAttendanceWindowStatus {
+  const hhmm = (currentTimeHHMM || '07:00').slice(0, 5);
+  const startTime = (schedule.startTime || '06:00').slice(0, 5);
+  const endTime = (schedule.endTime || '16:00').slice(0, 5);
+  const windowLabel = `${startTime} – ${endTime} WIB`;
+
+  if (hhmm < startTime) {
+    return {
+      isOpen: false,
+      state: 'before',
+      startTime,
+      endTime,
+      windowLabel,
+      message: `Absensi ${schedule.title} belum dibuka. Jadwal absen pukul ${windowLabel}.`,
+    };
+  }
+
+  if (hhmm > endTime) {
+    return {
+      isOpen: false,
+      state: 'closed',
+      startTime,
+      endTime,
+      windowLabel,
+      message: `Waktu absensi ${schedule.title} (${windowLabel}) telah berakhir.`,
+    };
+  }
+
+  return {
+    isOpen: true,
+    state: 'open',
+    startTime,
+    endTime,
+    windowLabel,
+    message: `Absensi dibuka (${windowLabel}).`,
+  };
+}
+
+export type PublicAttendanceChoice = 'hadir' | 'terlambat' | 'izin' | 'alfa';
+
+export interface PublicAttendanceEvalInput {
+  scheduleTitle: string;
+  choice: PublicAttendanceChoice;
+  currentTimeHHMM: string; // "HH:mm"
+  selectedSessions?: string[]; // e.g. ['dzuhur', 'ashar'] or ['istirahat1']
+  izinReason?: string;
+}
+
+export interface PublicAttendanceEvalResult {
+  valid: boolean;
+  error?: string;
+  status: AttendanceStatus;
+  checkInTime: string;
+  note: string;
+  autoDowngradedToLate: boolean;
+}
+
+/**
+ * Evaluates a public self-attendance submission against pos rules:
+ * - Gerbang: Hadir after 06:45 -> Terlambat
+ * - Shalat: 2 sessions (Dzuhur + Ashar) required -> 1 session = Terlambat
+ * - Warsis: 2 sessions (Istirahat 1 09:15 + Istirahat 2 12:30) required -> 1 session = Terlambat
+ * - Izin: requires non-empty keterangan/alasan
+ * - Alfa: maps to 'tidak_piket'
+ */
+export function evaluatePublicAttendanceSubmission(
+  input: PublicAttendanceEvalInput
+): PublicAttendanceEvalResult {
+  const rule = getPosRuleInfo(input.scheduleTitle);
+  const hhmm = (input.currentTimeHHMM || '07:00').slice(0, 5);
+
+  if (input.choice === 'izin') {
+    const cleanReason = (input.izinReason || '').trim();
+    if (!cleanReason) {
+      return {
+        valid: false,
+        error: 'Keterangan / alasan izin wajib diisi.',
+        status: 'izin',
+        checkInTime: '-',
+        note: '',
+        autoDowngradedToLate: false,
+      };
+    }
+    return {
+      valid: true,
+      status: 'izin',
+      checkInTime: '-',
+      note: cleanReason.slice(0, 400),
+      autoDowngradedToLate: false,
+    };
+  }
+
+  if (input.choice === 'alfa') {
+    return {
+      valid: true,
+      status: 'tidak_piket',
+      checkInTime: '-',
+      note: 'Alfa (tidak melaksanakan piket)',
+      autoDowngradedToLate: false,
+    };
+  }
+
+  // Multi-session pos (Shalat & Warsis)
+  if (rule.requiredSessions && rule.requiredSessions.length > 0) {
+    const validIds = new Set(rule.requiredSessions.map((s) => s.id));
+    const chosen = Array.from(
+      new Set((input.selectedSessions || []).filter((id) => validIds.has(id)))
+    );
+
+    if (chosen.length === 0) {
+      return {
+        valid: false,
+        error: `Pilih minimal 1 sesi jaga (${rule.requiredSessions
+          .map((s) => s.label)
+          .join(' / ')}).`,
+        status: 'belum_absen',
+        checkInTime: '-',
+        note: '',
+        autoDowngradedToLate: false,
+      };
+    }
+
+    const chosenLabels = rule.requiredSessions
+      .filter((s) => chosen.includes(s.id))
+      .map((s) => (s.timeLabel ? `${s.label} (${s.timeLabel})` : s.label));
+
+    const isComplete = chosen.length >= rule.requiredSessions.length;
+
+    if (!isComplete) {
+      return {
+        valid: true,
+        status: 'terlambat',
+        checkInTime: hhmm,
+        note: `Baru jaga 1× (${chosenLabels.join(', ')}) — wajib 2×`,
+        autoDowngradedToLate: input.choice === 'hadir',
+      };
+    }
+
+    if (input.choice === 'terlambat') {
+      return {
+        valid: true,
+        status: 'terlambat',
+        checkInTime: hhmm,
+        note: `Terlambat · Sesi 2× (${chosenLabels.join(' & ')})`,
+        autoDowngradedToLate: false,
+      };
+    }
+
+    return {
+      valid: true,
+      status: 'hadir',
+      checkInTime: hhmm,
+      note: `Lengkap 2× (${chosenLabels.join(' & ')})`,
+      autoDowngradedToLate: false,
+    };
+  }
+
+  // Jaga Gerbang tolerance check (max 06:45 WIB)
+  if (rule.maxToleranceTime && input.choice === 'hadir') {
+    if (hhmm > rule.maxToleranceTime) {
+      return {
+        valid: true,
+        status: 'terlambat',
+        checkInTime: hhmm,
+        note: `Melebihi toleransi jaga gerbang ${rule.maxToleranceTime} WIB (absen ${hhmm} WIB)`,
+        autoDowngradedToLate: true,
+      };
+    }
+    return {
+      valid: true,
+      status: 'hadir',
+      checkInTime: hhmm,
+      note: `Hadir tepat waktu (<= ${rule.maxToleranceTime} WIB)`,
+      autoDowngradedToLate: false,
+    };
+  }
+
+  if (input.choice === 'terlambat') {
+    const extraNote = (input.izinReason || '').trim();
+    return {
+      valid: true,
+      status: 'terlambat',
+      checkInTime: hhmm,
+      note: extraNote || `Terlambat (absen pukul ${hhmm} WIB)`,
+      autoDowngradedToLate: false,
+    };
+  }
+
+  return {
+    valid: true,
+    status: 'hadir',
+    checkInTime: hhmm,
+    note: `Hadir (absen pukul ${hhmm} WIB)`,
+    autoDowngradedToLate: false,
+  };
+}
+
+/**
+ * Extracts previously checked session IDs (dzuhur/ashar or istirahat1/istirahat2) from an existing attendance note
+ * so officers returning to log their 2nd session keep their 1st session pre-checked.
+ */
+export function parseCompletedSessionsFromNote(
+  scheduleTitle: string,
+  note?: string
+): string[] {
+  const rule = getPosRuleInfo(scheduleTitle);
+  if (!rule.requiredSessions || !note) return [];
+  const lower = note.toLowerCase();
+  const matched: string[] = [];
+
+  if (rule.category === 'shalat') {
+    if (lower.includes('dzuhur') || lower.includes('duhur')) {
+      matched.push('dzuhur');
+    }
+    if (lower.includes('ashar') || lower.includes('asar')) {
+      matched.push('ashar');
+    }
+  } else if (rule.category === 'warsis') {
+    if (
+      lower.includes('pertama') ||
+      lower.includes('09:15') ||
+      lower.includes('istirahat 1')
+    ) {
+      matched.push('istirahat1');
+    }
+    if (
+      lower.includes('kedua') ||
+      lower.includes('11:45') ||
+      lower.includes('12:30') ||
+      lower.includes('istirahat 2')
+    ) {
+      matched.push('istirahat2');
+    }
+  }
+
+  return matched;
+}
+
+export const PUBLIC_SELF_ATTENDANCE_RECORDER = 'Absen Publik';
+
+export function isPublicSelfAttendance(
+  record: AttendanceRecord | null
+): boolean {
+  if (!record) return false;
+  return record.recordedBy.toLowerCase().startsWith('absen publik');
+}
+
+export function isAttendanceVerifiedByAdmin(
+  record: AttendanceRecord | null
+): boolean {
+  if (!record) return false;
+  return !isPublicSelfAttendance(record);
+}
+
+export const LIE_REASON_PRESETS: string[] = [
+  'tidak ada di lokasi piket',
+  'datang melewati batas waktu piket',
+  'hanya jaga 1× sesi padahal isi hadir',
+  'tidak melaksanakan tugas piket',
+  'alasan izin tidak sesuai kenyataan',
+];
+
+export interface ParsedLieAttendanceInfo {
+  isLie: boolean;
+  lieReason: string;
+  selfClaim: string;
+  headline: string;
+}
+
+/**
+ * Formats what the officer originally submitted themselves (for small sub-caption when admin marks "Dia bohong").
+ */
+export function formatSelfAttendanceClaim(
+  record: AttendanceRecord | null
+): string {
+  if (!record || record.status === 'belum_absen') return '';
+  // If already a lie record, preserve its previously captured selfClaim
+  const parsed = parseLieAttendanceRecord(record);
+  if (parsed.isLie && parsed.selfClaim) {
+    return parsed.selfClaim;
+  }
+
+  const label = STATUS_LABELS_ID[record.status];
+  if (record.status === 'izin' || record.status === 'sakit') {
+    const cleanNote = (record.note || '').trim();
+    return cleanNote ? `${label} — ${cleanNote.slice(0, 120)}` : label;
+  }
+  if (record.checkInTime && record.checkInTime !== '-') {
+    return `${label} (${record.checkInTime} WIB)`;
+  }
+  return label;
+}
+
+/**
+ * Builds the structured human-readable note stored in Firestore when Admin flags a dishonest self-attendance:
+ * Format: "Dia bohong <alasan> [Absen sendiri: <klaim_sendiri>]"
+ */
+export function buildLieAttendanceNote(
+  lieReason: string,
+  selfClaim?: string
+): string {
+  const cleanReason =
+    (lieReason || '')
+      .trim()
+      .replace(/^dia\s+bohong\s*[:\-–—]?\s*/i, '') ||
+    'tidak sesuai fakta piket di lapangan';
+  const cleanClaim = (selfClaim || '').trim();
+  const full = cleanClaim
+    ? `Dia bohong ${cleanReason} [Absen sendiri: ${cleanClaim}]`
+    : `Dia bohong ${cleanReason}`;
+  return full.slice(0, 500);
+}
+
+/**
+ * Parses an AttendanceRecord to extract structured "Dia bohong <alasan>" & small self-claim sub-caption.
+ * Backward-compatible with legacy "Absensi Palsu" records.
+ */
+export function parseLieAttendanceRecord(
+  record: AttendanceRecord | null
+): ParsedLieAttendanceInfo {
+  if (!record || !record.note) {
+    return { isLie: false, lieReason: '', selfClaim: '', headline: '' };
+  }
+  const raw = record.note.trim();
+
+  // New structured format: "Dia bohong <alasan> [Absen sendiri: <klaim>]"
+  const newMatch = raw.match(
+    /^dia\s+bohong\s+(.+?)(?:\s*\[absen sendiri:\s*(.+?)\])?$/i
+  );
+  if (newMatch) {
+    const reason = (newMatch[1] || '').trim();
+    const selfClaim = (newMatch[2] || '').trim();
+    return {
+      isLie: true,
+      lieReason: reason,
+      selfClaim,
+      headline: `Dia bohong ${reason}`,
+    };
+  }
+
+  // Legacy fallback: "... (Absensi Palsu — klaim Hadir): alasan"
+  if (raw.toLowerCase().includes('absensi palsu')) {
+    const claimMatch = raw.match(/klaim\s+([^)\]]+)/i);
+    const reasonSplit = raw.split('):');
+    const legacyReason =
+      reasonSplit.length > 1 && reasonSplit[1].trim()
+        ? reasonSplit[1].trim()
+        : 'tidak sesuai kehadiran di lokasi piket';
+    const selfClaim = claimMatch ? claimMatch[1].trim() : '';
+    return {
+      isLie: true,
+      lieReason: legacyReason,
+      selfClaim,
+      headline: `Dia bohong ${legacyReason}`,
+    };
+  }
+
+  return { isLie: false, lieReason: '', selfClaim: '', headline: '' };
+}
+
+export function isFakeAttendanceRecord(
+  record: AttendanceRecord | null
+): boolean {
+  return parseLieAttendanceRecord(record).isLie;
+}
+
+export function formatAdminVerifierName(displayName?: string): string {
+  const clean = (displayName || 'Admin OSIS').trim();
+  return `Verifikasi Admin: ${clean}`.slice(0, 120);
+}
+
+/**
+ * Builds a clear Indonesian verification/correction note for admin actions,
+ * including "Dia bohong <alasan>" with preserved self-attendance claim.
+ */
+export function buildAdminVerificationNote(
+  newStatus: AttendanceStatus,
+  previousStatus: AttendanceStatus,
+  isFakeAttendance: boolean,
+  customNote?: string,
+  selfClaimOverride?: string
+): string {
+  const trimmedCustom = (customNote || '').trim();
+
+  if (isFakeAttendance) {
+    const fallbackReason =
+      newStatus === 'tidak_piket'
+        ? 'tidak melaksanakan piket di lokasi'
+        : newStatus === 'terlambat'
+        ? 'datang terlambat dari jam piket'
+        : 'absensi tidak sesuai fakta di lapangan';
+    const effectiveClaim =
+      (selfClaimOverride || '').trim() ||
+      (previousStatus !== 'belum_absen' ? STATUS_LABELS_ID[previousStatus] : '');
+    return buildLieAttendanceNote(
+      trimmedCustom || fallbackReason,
+      effectiveClaim
+    );
+  }
+
+  if (trimmedCustom) {
+    return trimmedCustom;
+  }
+
+  if (newStatus === 'hadir') return 'Terverifikasi hadir';
+  if (newStatus === 'terlambat') return 'Terverifikasi terlambat';
+  if (newStatus === 'tidak_piket') return 'Alfa (tidak piket)';
+  return '';
+}
+
+// =========================================================================
+// PER-CATEGORY DATE-RANGE HOLIDAY RULES ("Libur Piket")
+// Stored inside Firestore `attendance` collection within strict schema rules
+// =========================================================================
+export const HOLIDAY_RANGE_MEMBER_ID = '__HOLIDAY_RANGE__';
+export const HOLIDAY_CATEGORY_PREFIX = '__HOLIDAY_CAT__:';
+
+export type HolidayCategory = 'all' | 'gerbang' | 'warsis' | 'shalat';
+
+export const HOLIDAY_CATEGORY_LABELS: Record<HolidayCategory, string> = {
+  all: 'Semua Kategori Piket',
+  gerbang: 'Jaga Gerbang',
+  warsis: 'Piket Warsis',
+  shalat: 'Absensi Shalat',
+};
+
+export interface HolidayRangeRule {
+  id: string;
+  category: HolidayCategory;
+  startDate: string; // YYYY-MM-DD
+  endDate: string; // YYYY-MM-DD
+  reason: string;
+  recordedBy: string;
+}
+
+/**
+ * Builds a valid Firestore AttendanceRecord payload representing a category-scoped holiday date range.
+ */
+export function createHolidayRangeRecord(
+  category: HolidayCategory,
+  startDate: string,
+  endDate: string,
+  reason: string,
+  recordedBy: string,
+  customId?: string
+): AttendanceRecord {
+  const cleanStart = startDate.slice(0, 10);
+  const cleanEnd = endDate >= cleanStart ? endDate.slice(0, 10) : cleanStart;
+  const suffix = String(Date.now()).slice(-6);
+  const id = (
+    customId || `holiday-${category}-${cleanStart}-${cleanEnd}-${suffix}`
+  ).slice(0, 120);
+
+  return {
+    id,
+    date: cleanStart,
+    scheduleId: `${HOLIDAY_CATEGORY_PREFIX}${category}`,
+    memberId: HOLIDAY_RANGE_MEMBER_ID,
+    status: 'izin',
+    checkInTime: cleanEnd,
+    note: reason.trim().slice(0, 500),
+    recordedBy: (recordedBy || 'Verifikasi Admin: Admin OSIS').slice(0, 120),
+  };
+}
+
+/**
+ * Extracts all saved HolidayRangeRule records from attendanceRecords, sorted by startDate ascending.
+ */
+export function getHolidayRangeRules(
+  attendanceRecords: AttendanceRecord[]
+): HolidayRangeRule[] {
+  const rules: HolidayRangeRule[] = [];
+  for (const r of attendanceRecords) {
+    if (
+      r.memberId !== HOLIDAY_RANGE_MEMBER_ID ||
+      !r.scheduleId.startsWith(HOLIDAY_CATEGORY_PREFIX)
+    ) {
+      continue;
+    }
+    const rawCat = r.scheduleId.slice(HOLIDAY_CATEGORY_PREFIX.length);
+    const category: HolidayCategory =
+      rawCat === 'gerbang' || rawCat === 'warsis' || rawCat === 'shalat'
+        ? rawCat
+        : 'all';
+    const startDate = r.date.slice(0, 10);
+    const endDate =
+      r.checkInTime && /^\d{4}-\d{2}-\d{2}$/.test(r.checkInTime)
+        ? r.checkInTime
+        : startDate;
+    if (!r.note || !r.note.trim()) continue;
+    rules.push({
+      id: r.id,
+      category,
+      startDate,
+      endDate,
+      reason: r.note.trim(),
+      recordedBy: r.recordedBy,
+    });
+  }
+
+  return rules.sort(
+    (a, b) =>
+      a.startDate.localeCompare(b.startDate) ||
+      a.endDate.localeCompare(b.endDate) ||
+      a.category.localeCompare(b.category)
+  );
+}
+
+/**
+ * Returns all HolidayRangeRules active on `dateStr` (where startDate <= dateStr <= endDate).
+ */
+export function getActiveHolidaysForDate(
+  dateStr: string,
+  attendanceRecords: AttendanceRecord[]
+): HolidayRangeRule[] {
+  return getHolidayRangeRules(attendanceRecords).filter(
+    (h) => dateStr >= h.startDate && dateStr <= h.endDate
+  );
+}
+
+/**
+ * Checks whether a specific schedule (by title) is on holiday on `dateStr`.
+ * Matches category-specific holiday ranges, 'all' holiday ranges, or legacy single-day holiday notes.
+ */
+export function getHolidayForScheduleOnDate(
+  dateStr: string,
+  scheduleTitle: string,
+  attendanceRecords: AttendanceRecord[]
+): HolidayRangeRule | null {
+  const posCat = getPosRuleInfo(scheduleTitle).category;
+  const activeOnDate = getActiveHolidaysForDate(dateStr, attendanceRecords);
+
+  // Prefer category-specific match first, then 'all'
+  const specific = activeOnDate.find((h) => h.category === posCat);
+  if (specific) return specific;
+
+  const allMatch = activeOnDate.find((h) => h.category === 'all');
+  if (allMatch) return allMatch;
+
+  // Backward compatibility with legacy single-day DAY_NOTE_SCHEDULE_ID holiday
+  const legacyDayNote = getDayAttendanceNote(
+    dateStr,
+    attendanceRecords,
+    DAY_NOTE_SCHEDULE_ID
+  );
+  if (legacyDayNote && legacyDayNote.isHoliday) {
+    return {
+      id: legacyDayNote.id,
+      category: 'all',
+      startDate: dateStr,
+      endDate: dateStr,
+      reason: legacyDayNote.note,
+      recordedBy: legacyDayNote.recordedBy,
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Formats a YYYY-MM-DD date range concisely in Indonesian, e.g. "19 – 22 Nov 2026" or "19 Nov 2026".
+ */
+export function formatShortDateRangeId(
+  startDate: string,
+  endDate: string
+): string {
+  const monthsShort = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'Mei',
+    'Jun',
+    'Jul',
+    'Agu',
+    'Sep',
+    'Okt',
+    'Nov',
+    'Des',
+  ];
+  const s = parseDateString(startDate);
+  const e = parseDateString(endDate);
+  const sDay = s.getDate();
+  const sMon = monthsShort[s.getMonth()];
+  const sYear = s.getFullYear();
+
+  if (startDate === endDate) {
+    return `${sDay} ${sMon} ${sYear}`;
+  }
+
+  const eDay = e.getDate();
+  const eMon = monthsShort[e.getMonth()];
+  const eYear = e.getFullYear();
+
+  if (sYear === eYear && s.getMonth() === e.getMonth()) {
+    return `${sDay} – ${eDay} ${sMon} ${sYear}`;
+  }
+  if (sYear === eYear) {
+    return `${sDay} ${sMon} – ${eDay} ${eMon} ${sYear}`;
+  }
+  return `${sDay} ${sMon} ${sYear} – ${eDay} ${eMon} ${eYear}`;
+}
+
+// =========================================================================
+// VIOLATION LEADERBOARD ("Leaderboard Pelanggaran")
+// Alfa = 2 poin · Terlambat = 1 poin · Reset Mingguan (Senin) & Bulanan (Tgl 1)
+// =========================================================================
+export const VIOLATION_POINTS_ALFA = 2;
+export const VIOLATION_POINTS_TERLAMBAT = 1;
+
+export type ViolationLeaderboardPeriod = 'mingguan' | 'bulanan';
+
+export interface ViolationLeaderboardEntry {
+  rank: number;
+  member: OsisMember;
+  alfaCount: number;
+  autoAlfaCount: number;
+  terlambatCount: number;
+  points: number;
+}
+
+export interface ViolationLeaderboardResult {
+  periodType: ViolationLeaderboardPeriod;
+  startDate: string;
+  endDate: string;
+  periodLabel: string;
+  resetNote: string;
+  totalViolators: number;
+  totalPoints: number;
+  entries: ViolationLeaderboardEntry[];
+}
+
+/**
+ * Calculates the Violation Leaderboard for the active weekly (Mon–Sun, resets every Monday)
+ * or monthly (1st–last day, resets every 1st of month) period.
+ * Scoring: Alfa = 2 points (including automatic Alfa for missed shifts), Terlambat = 1 point.
+ */
+export function calculateViolationLeaderboard(
+  periodType: ViolationLeaderboardPeriod,
+  referenceDateStr: string,
+  schedules: PiketSchedule[],
+  members: OsisMember[],
+  swaps: ScheduleSwap[],
+  attendanceRecords: AttendanceRecord[],
+  autoAlfaContext: AutoAlfaContext
+): ViolationLeaderboardResult {
+  const range =
+    periodType === 'mingguan'
+      ? getWeekRange(referenceDateStr)
+      : getMonthRange(referenceDateStr.slice(0, 7));
+
+  // Only evaluate up to todayStr so future dates never generate violations
+  const effectiveEndDate =
+    range.endDate > autoAlfaContext.todayStr
+      ? autoAlfaContext.todayStr
+      : range.endDate;
+
+  const dates =
+    range.startDate <= effectiveEndDate
+      ? getDateRangeStrings(range.startDate, effectiveEndDate)
+      : [];
+
+  const memberMap = new Map<string, OsisMember>();
+  for (const m of members) memberMap.set(m.id, m);
+
+  const counts = new Map<
+    string,
+    { alfaCount: number; autoAlfaCount: number; terlambatCount: number }
+  >();
+
+  for (const d of dates) {
+    const resolvedList = resolveSchedulesForDate(
+      d,
+      schedules,
+      members,
+      swaps,
+      attendanceRecords,
+      autoAlfaContext
+    );
+
+    for (const res of resolvedList) {
+      if (
+        getHolidayForScheduleOnDate(d, res.schedule.title, attendanceRecords)
+      ) {
+        continue;
+      }
+
+      for (const dm of res.dutyMembers) {
+        if (
+          dm.effectiveStatus !== 'tidak_piket' &&
+          dm.effectiveStatus !== 'terlambat'
+        ) {
+          continue;
+        }
+        const curr = counts.get(dm.member.id) || {
+          alfaCount: 0,
+          autoAlfaCount: 0,
+          terlambatCount: 0,
+        };
+        if (dm.effectiveStatus === 'tidak_piket') {
+          curr.alfaCount += 1;
+          if (dm.isAutoAlfa) curr.autoAlfaCount += 1;
+        } else if (dm.effectiveStatus === 'terlambat') {
+          curr.terlambatCount += 1;
+        }
+        counts.set(dm.member.id, curr);
+      }
+    }
+  }
+
+  const rawEntries: Omit<ViolationLeaderboardEntry, 'rank'>[] = [];
+  for (const [memberId, st] of counts.entries()) {
+    const member = memberMap.get(memberId);
+    if (!member) continue;
+    const points =
+      st.alfaCount * VIOLATION_POINTS_ALFA +
+      st.terlambatCount * VIOLATION_POINTS_TERLAMBAT;
+    if (points <= 0) continue;
+    rawEntries.push({
+      member,
+      alfaCount: st.alfaCount,
+      autoAlfaCount: st.autoAlfaCount,
+      terlambatCount: st.terlambatCount,
+      points,
+    });
+  }
+
+  rawEntries.sort((a, b) => {
+    if (b.points !== a.points) return b.points - a.points;
+    if (b.alfaCount !== a.alfaCount) return b.alfaCount - a.alfaCount;
+    if (b.terlambatCount !== a.terlambatCount) {
+      return b.terlambatCount - a.terlambatCount;
+    }
+    return a.member.name.localeCompare(b.member.name, 'id');
+  });
+
+  const entries: ViolationLeaderboardEntry[] = rawEntries.map((item, idx) => ({
+    ...item,
+    rank: idx + 1,
+  }));
+
+  const totalPoints = entries.reduce((sum, e) => sum + e.points, 0);
+
+  return {
+    periodType,
+    startDate: range.startDate,
+    endDate: range.endDate,
+    periodLabel: formatShortDateRangeId(range.startDate, range.endDate),
+    resetNote:
+      periodType === 'mingguan'
+        ? 'Reset otomatis setiap hari Senin'
+        : 'Reset otomatis setiap tanggal 1',
+    totalViolators: entries.length,
+    totalPoints,
+    entries,
+  };
+}
+
+// =========================================================================
+// APP FEATURE SETTINGS (Persisted in Firestore `attendance` collection)
+// =========================================================================
+export const APP_SETTING_SCHEDULE_ID = '__APP_SETTING__';
+export const LEADERBOARD_SETTING_MEMBER_ID = '__LEADERBOARD_ENABLED__';
+export const LEADERBOARD_SETTING_RECORD_ID = 'setting-leaderboard-enabled';
+
+/**
+ * Identifies internal metadata documents stored in the `attendance` collection
+ * (day notes, holiday range rules, app settings) so they are excluded from member logs.
+ */
+export function isSystemMetadataAttendanceRecord(
+  record: AttendanceRecord
+): boolean {
+  return (
+    record.memberId === DAY_NOTE_MEMBER_ID ||
+    record.memberId === HOLIDAY_RANGE_MEMBER_ID ||
+    record.memberId === LEADERBOARD_SETTING_MEMBER_ID ||
+    record.scheduleId === APP_SETTING_SCHEDULE_ID ||
+    record.scheduleId === DAY_NOTE_SCHEDULE_ID ||
+    record.scheduleId.startsWith(HOLIDAY_CATEGORY_PREFIX)
+  );
+}
+
+/**
+ * Returns whether the public Violation Leaderboard feature is currently enabled.
+ * Defaults to `true` when no explicit setting document exists yet.
+ */
+export function isLeaderboardFeatureEnabled(
+  attendanceRecords: AttendanceRecord[]
+): boolean {
+  const setting = attendanceRecords.find(
+    (r) =>
+      r.id === LEADERBOARD_SETTING_RECORD_ID ||
+      (r.scheduleId === APP_SETTING_SCHEDULE_ID &&
+        r.memberId === LEADERBOARD_SETTING_MEMBER_ID)
+  );
+  if (!setting) return true;
+  if (setting.note.trim().toLowerCase() === 'false') return false;
+  if (setting.note.trim().toLowerCase() === 'true') return true;
+  return setting.status !== 'tidak_piket';
+}
+
+/**
+ * Builds a valid Firestore AttendanceRecord payload representing the Leaderboard enabled/disabled toggle.
+ */
+export function createLeaderboardSettingRecord(
+  enabled: boolean,
+  recordedBy: string
+): AttendanceRecord {
+  return {
+    id: LEADERBOARD_SETTING_RECORD_ID,
+    date: '2000-01-01',
+    scheduleId: APP_SETTING_SCHEDULE_ID,
+    memberId: LEADERBOARD_SETTING_MEMBER_ID,
+    status: enabled ? 'hadir' : 'tidak_piket',
+    checkInTime: '-',
+    note: enabled ? 'true' : 'false',
+    recordedBy: (recordedBy || 'Verifikasi Admin: Admin OSIS').slice(0, 120),
+  };
+}
+
+
 
 
 

@@ -8,19 +8,33 @@ import { Settings, ShieldCheck, LogOut, Lock } from 'lucide-react';
 import {
   DAY_NOTE_MEMBER_ID,
   DAY_NOTE_SCHEDULE_ID,
+  HOLIDAY_CATEGORY_LABELS,
   PERMANENT_DEVELOPER_ACCOUNT,
+  PUBLIC_SELF_ATTENDANCE_RECORDER,
+  STATUS_LABELS_ID,
   addDays,
   canDeleteAccount,
   canManageAdminAccounts,
   createDayAttendanceNoteRecord,
+  createHolidayRangeRecord,
+  createLeaderboardSettingRecord,
+  formatAdminVerifierName,
   formatDateString,
+  formatShortDateRangeId,
   getDefaultDisplayDateForHour,
+  getHolidayForScheduleOnDate,
+  getPosAttendanceWindowStatus,
+  getScheduleDateEditStatus,
+  isAttendanceVerifiedByAdmin,
+  isLeaderboardFeatureEnabled,
+  LEADERBOARD_SETTING_RECORD_ID,
   replaceMemberInSchedule,
   resolveSchedulesForDate,
   sanitizeScheduleForDb,
   type AppAccount,
   type AttendanceRecord,
   type AttendanceStatus,
+  type HolidayCategory,
   type OsisMember,
   type PiketSchedule,
   type ScheduleSwap,
@@ -48,6 +62,7 @@ import {
   saveAccountToDb,
   deleteAccountFromDb,
   seedOfficialSchedulesToDb,
+  syncOfficialScheduleTimeWindowsIfLegacy,
 } from './firebase';
 import { PublicDisplayBoard } from './components/PublicDisplayBoard';
 import { LiveDisplayAndAttendance } from './components/LiveDisplayAndAttendance';
@@ -86,6 +101,26 @@ export default function App() {
     todayStr,
     new Date().getHours()
   );
+
+  const [currentTimeHHMM, setCurrentTimeHHMM] = useState<string>(() => {
+    const now = new Date();
+    return `${String(now.getHours()).padStart(2, '0')}:${String(
+      now.getMinutes()
+    ).padStart(2, '0')}`;
+  });
+
+  useEffect(() => {
+    const syncClock = () => {
+      const now = new Date();
+      setCurrentTimeHHMM(
+        `${String(now.getHours()).padStart(2, '0')}:${String(
+          now.getMinutes()
+        ).padStart(2, '0')}`
+      );
+    };
+    const timer = window.setInterval(syncClock, 15000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   // Logged-in account state (persisted in sessionStorage for current browser session)
   const [loggedInAccount, setLoggedInAccount] = useState<AppAccount | null>(
@@ -138,6 +173,7 @@ export default function App() {
     PERMANENT_DEVELOPER_ACCOUNT,
   ]);
   const hasSeededRef = useRef(false);
+  const hasSyncedTimeWindowsRef = useRef(false);
 
   // Modal state for Swap / Change Schedule
   const [swapModalState, setSwapModalState] = useState<{
@@ -312,6 +348,12 @@ export default function App() {
             a.startTime.localeCompare(b.startTime) || a.id.localeCompare(b.id)
         );
         setSchedules(list);
+        if (!hasSyncedTimeWindowsRef.current) {
+          hasSyncedTimeWindowsRef.current = true;
+          syncOfficialScheduleTimeWindowsIfLegacy(list).catch(() => {
+            // ignore background sync error
+          });
+        }
       },
       (err) => handleFirestoreError(err, OperationType.LIST, 'schedules')
     );
@@ -435,13 +477,16 @@ export default function App() {
     showToast('Anda telah keluar dari Admin Panel.');
   };
 
-  // Resolve active schedules for selectedDate and nextPreviewDate
+  // Resolve active schedules for selectedDate and nextPreviewDate (with automatic Alfa after schedule end / past dates)
+  const autoAlfaContext = { todayStr, currentTimeHHMM };
+
   const resolvedTodaySchedules = resolveSchedulesForDate(
     selectedDate,
     schedules,
     members,
     swaps,
-    attendanceRecords
+    attendanceRecords,
+    autoAlfaContext
   );
 
   const resolvedNextDaySchedules = resolveSchedulesForDate(
@@ -449,10 +494,86 @@ export default function App() {
     schedules,
     members,
     swaps,
-    attendanceRecords
+    attendanceRecords,
+    autoAlfaContext
   );
 
-  // Firestore Handlers
+  // Public Self-Attendance Handler (No Login Required, Strictly Today Only)
+  const handlePublicRecordAttendance = async (
+    date: string,
+    scheduleId: string,
+    memberId: string,
+    status: AttendanceStatus,
+    checkInTime: string,
+    note: string
+  ) => {
+    const editStatus = getScheduleDateEditStatus(date, todayStr);
+    if (!editStatus.canEdit) {
+      showToast(editStatus.reason);
+      return;
+    }
+
+    const targetSchedule = schedules.find((s) => s.id === scheduleId);
+    if (targetSchedule) {
+      const activeHoliday = getHolidayForScheduleOnDate(
+        date,
+        targetSchedule.title,
+        attendanceRecords
+      );
+      if (activeHoliday) {
+        showToast(
+          `${targetSchedule.title} sedang libur piket (${activeHoliday.reason}).`
+        );
+        return;
+      }
+
+      const now = new Date();
+      const nowHHMM = `${String(now.getHours()).padStart(2, '0')}:${String(
+        now.getMinutes()
+      ).padStart(2, '0')}`;
+      const windowStatus = getPosAttendanceWindowStatus(targetSchedule, nowHHMM);
+      if (!windowStatus.isOpen) {
+        showToast(windowStatus.message);
+        return;
+      }
+    }
+
+    const existing = attendanceRecords.find(
+      (r) =>
+        r.date === date &&
+        r.scheduleId === scheduleId &&
+        r.memberId === memberId
+    );
+
+    if (existing && isAttendanceVerifiedByAdmin(existing)) {
+      showToast(
+        'Status absensi sudah diverifikasi oleh Admin dan tidak dapat diubah secara publik.'
+      );
+      return;
+    }
+
+    const recordPayload: AttendanceRecord = {
+      id: existing ? existing.id : `att-${date}-${scheduleId}-${memberId}`,
+      date,
+      scheduleId,
+      memberId,
+      status,
+      checkInTime: (checkInTime || '-').slice(0, 20),
+      note: (note || '').trim().slice(0, 500),
+      recordedBy: PUBLIC_SELF_ATTENDANCE_RECORDER,
+    };
+
+    await saveAttendanceToDb(recordPayload, Boolean(existing));
+
+    const memberObj = members.find((m) => m.id === memberId);
+    if (memberObj) {
+      showToast(
+        `Absensi ${memberObj.name} (${STATUS_LABELS_ID[status]}) tercatat. Menunggu verifikasi Admin.`
+      );
+    }
+  };
+
+  // Admin Verification & Attendance Correction Handler (Strictly Today Only)
   const handleRecordAttendance = async (
     date: string,
     scheduleId: string,
@@ -460,6 +581,12 @@ export default function App() {
     status: AttendanceStatus,
     note?: string
   ) => {
+    const editStatus = getScheduleDateEditStatus(date, todayStr);
+    if (!editStatus.canEdit) {
+      showToast(editStatus.reason);
+      return;
+    }
+
     const now = new Date();
     const checkInTime =
       status === 'hadir' || status === 'terlambat'
@@ -475,8 +602,7 @@ export default function App() {
         r.memberId === memberId
     );
 
-    const recorderName =
-      loggedInAccount?.displayName || 'Admin Pengurus OSIS';
+    const recorderName = formatAdminVerifierName(loggedInAccount?.displayName);
 
     const recordPayload: AttendanceRecord = existing
       ? {
@@ -488,7 +614,7 @@ export default function App() {
                 ? existing.checkInTime
                 : checkInTime
               : '-',
-          note: note !== undefined ? note : existing.note,
+          note: (note !== undefined ? note : existing.note).slice(0, 500),
           recordedBy: recorderName,
         }
       : {
@@ -498,7 +624,7 @@ export default function App() {
           memberId,
           status,
           checkInTime,
-          note: note || '',
+          note: (note || '').slice(0, 500),
           recordedBy: recorderName,
         };
 
@@ -506,11 +632,66 @@ export default function App() {
 
     const memberObj = members.find((m) => m.id === memberId);
     if (memberObj) {
-      showToast(`Presensi ${memberObj.name} berhasil disimpan ke database.`);
+      showToast(
+        `Verifikasi ${memberObj.name} (${STATUS_LABELS_ID[status]}) tersimpan.`
+      );
     }
   };
 
+  // Admin Cancel / Clear Attendance Handler (Strictly Today Only — prevents accidental click)
+  const handleClearAttendance = async (
+    date: string,
+    scheduleId: string,
+    memberId: string
+  ) => {
+    const editStatus = getScheduleDateEditStatus(date, todayStr);
+    if (!editStatus.canEdit) {
+      showToast(editStatus.reason);
+      return;
+    }
+
+    const existing = attendanceRecords.find(
+      (r) =>
+        r.date === date &&
+        r.scheduleId === scheduleId &&
+        r.memberId === memberId
+    );
+    if (!existing) return;
+
+    await deleteAttendanceFromDb(existing.id);
+
+    const memberObj = members.find((m) => m.id === memberId);
+    showToast(
+      memberObj
+        ? `Tanda absen ${memberObj.name} dibatalkan.`
+        : 'Tanda absen berhasil dibatalkan.'
+    );
+  };
+
+  // Admin Toggle for Violation Leaderboard Visibility (Synced via Firestore)
+  const isLeaderboardEnabled = isLeaderboardFeatureEnabled(attendanceRecords);
+
+  const handleToggleLeaderboardEnabled = async (nextEnabled: boolean) => {
+    const recorderName = formatAdminVerifierName(loggedInAccount?.displayName);
+    const hasExisting = attendanceRecords.some(
+      (r) => r.id === LEADERBOARD_SETTING_RECORD_ID
+    );
+    const payload = createLeaderboardSettingRecord(nextEnabled, recorderName);
+    await saveAttendanceToDb(payload, hasExisting);
+    showToast(
+      nextEnabled
+        ? 'Fitur Leaderboard Pelanggaran diaktifkan untuk semua pengguna.'
+        : 'Fitur Leaderboard Pelanggaran dinonaktifkan dari tampilan pengguna.'
+    );
+  };
+
   const handleMarkAllPresent = async (date: string, scheduleId: string) => {
+    const editStatus = getScheduleDateEditStatus(date, todayStr);
+    if (!editStatus.canEdit) {
+      showToast(editStatus.reason);
+      return;
+    }
+
     const targetResolved = resolveSchedulesForDate(
       date,
       schedules.filter((s) => s.id === scheduleId),
@@ -526,8 +707,7 @@ export default function App() {
       now.getMinutes()
     ).padStart(2, '0')}`;
 
-    const recorderName =
-      loggedInAccount?.displayName || 'Admin Pengurus OSIS';
+    const recorderName = formatAdminVerifierName(loggedInAccount?.displayName);
 
     const batchPayload: AttendanceRecord[] = targetResolved.dutyMembers.map(
       (dm) => {
@@ -540,11 +720,15 @@ export default function App() {
         return existing
           ? {
               ...existing,
-              status: 'hadir',
+              status: existing.status === 'belum_absen' ? 'hadir' : existing.status,
               checkInTime:
-                existing.checkInTime !== '-'
-                  ? existing.checkInTime
-                  : checkInTime,
+                existing.status === 'hadir' ||
+                existing.status === 'terlambat' ||
+                existing.status === 'belum_absen'
+                  ? existing.checkInTime !== '-'
+                    ? existing.checkInTime
+                    : checkInTime
+                  : existing.checkInTime,
               recordedBy: recorderName,
             }
           : {
@@ -554,7 +738,7 @@ export default function App() {
               memberId: dm.member.id,
               status: 'hadir',
               checkInTime,
-              note: 'Hadir tepat waktu',
+              note: 'Terverifikasi hadir',
               recordedBy: recorderName,
             };
       }
@@ -562,7 +746,7 @@ export default function App() {
 
     await saveBatchAttendanceToDb(batchPayload);
     showToast(
-      `Semua petugas pada ${targetResolved.schedule.title} ditandai Hadir.`
+      `Semua petugas pada ${targetResolved.schedule.title} telah diverifikasi.`
     );
   };
 
@@ -573,8 +757,13 @@ export default function App() {
     applyToAllMembers: boolean,
     targetScheduleId: string = DAY_NOTE_SCHEDULE_ID
   ) => {
-    const recorderName =
-      loggedInAccount?.displayName || 'Admin Pengurus OSIS';
+    const editStatus = getScheduleDateEditStatus(date, todayStr);
+    if (!editStatus.canEdit) {
+      showToast(editStatus.reason);
+      return;
+    }
+
+    const recorderName = formatAdminVerifierName(loggedInAccount?.displayName);
     const noteRecord = createDayAttendanceNoteRecord(
       date,
       note,
@@ -617,7 +806,7 @@ export default function App() {
     showToast(
       applyToAllMembers
         ? `Keterangan "${note}" disimpan & diterapkan ke seluruh petugas.`
-        : `Keterangan "${note}" berhasil disimpan ke daftar hadir.`
+        : `Keterangan "${note}" berhasil disimpan.`
     );
   };
 
@@ -625,6 +814,12 @@ export default function App() {
     date: string,
     targetScheduleId: string = DAY_NOTE_SCHEDULE_ID
   ) => {
+    const editStatus = getScheduleDateEditStatus(date, todayStr);
+    if (!editStatus.canEdit) {
+      showToast(editStatus.reason);
+      return;
+    }
+
     const existing = attendanceRecords.find(
       (r) =>
         r.date === date &&
@@ -635,6 +830,49 @@ export default function App() {
       await deleteAttendanceFromDb(existing.id);
       showToast('Keterangan daftar hadir berhasil dihapus.');
     }
+  };
+
+  // Per-Category Date-Range Holiday ("Libur Piket") Handlers
+  const handleSaveHolidayRange = async (
+    category: HolidayCategory,
+    startDate: string,
+    endDate: string,
+    reason: string
+  ) => {
+    const cleanReason = reason.trim();
+    if (!cleanReason) {
+      showToast('Alasan libur piket wajib diisi.');
+      return;
+    }
+    if (startDate < todayStr) {
+      showToast('Tanggal mulai libur piket tidak boleh di hari yang sudah berlalu.');
+      return;
+    }
+    if (endDate < startDate) {
+      showToast('Tanggal selesai libur harus sama atau setelah tanggal mulai.');
+      return;
+    }
+
+    const recorderName = formatAdminVerifierName(loggedInAccount?.displayName);
+    const holidayRecord = createHolidayRangeRecord(
+      category,
+      startDate,
+      endDate,
+      cleanReason,
+      recorderName
+    );
+    await saveAttendanceToDb(holidayRecord, false);
+    showToast(
+      `Libur ${HOLIDAY_CATEGORY_LABELS[category]} (${formatShortDateRangeId(
+        startDate,
+        endDate
+      )}) berhasil disimpan.`
+    );
+  };
+
+  const handleDeleteHolidayRange = async (holidayId: string) => {
+    await deleteAttendanceFromDb(holidayId);
+    showToast('Jadwal libur piket berhasil dihapus.');
   };
 
   const handleAddSchedule = async (newSchedule: PiketSchedule) => {
@@ -674,6 +912,11 @@ export default function App() {
   };
 
   const handleSaveTemporarySwap = async (swap: ScheduleSwap) => {
+    const editStatus = getScheduleDateEditStatus(swap.date, todayStr);
+    if (!editStatus.canEdit) {
+      showToast(editStatus.reason);
+      return;
+    }
     const duplicate = swaps.find(
       (s) =>
         s.date === swap.date &&
@@ -801,135 +1044,87 @@ export default function App() {
   const isDeveloper = canManageAdminAccounts(loggedInAccount);
 
   return (
-    <div className="min-h-screen flex flex-col bg-[#FFF9F2] text-stone-800">
-      {/* Top Navigation Bar is ONLY rendered when logged into the Admin Panel.
-          When on the Display view (activeTab === 'display'), no navbar or page buttons are shown. */}
+    <div className="min-h-screen flex flex-col text-slate-900 bg-spatial-3d">
+      {/* Simplified, Clean Admin Navigation Bar with subtle 3D elevation */}
       {isAdminView && loggedInAccount && (
         <>
-          <header className="flex flex-wrap items-center justify-between gap-4 px-4 sm:px-6 py-3.5 bg-white border-b-2 border-[#F3E3D0] sticky top-0 z-30">
-            <div className="flex items-center gap-3">
+          <header className="flex items-center justify-between gap-4 px-4 sm:px-6 h-14 bg-white/95 backdrop-blur-md border-b border-slate-200/90 shadow-[0_2px_12px_-4px_rgba(15,23,42,0.08)] sticky top-0 z-30">
+            <div className="flex items-center gap-6 min-w-0">
               <a
                 href="#admin-attendance"
                 onClick={(e) => {
                   e.preventDefault();
                   switchTab('admin_attendance');
                 }}
-                className="text-lg sm:text-xl font-bold tracking-tight text-stone-900 whitespace-nowrap shrink-0 font-display"
+                className="text-base font-bold tracking-tight text-stone-900 whitespace-nowrap shrink-0"
               >
-                SiPiket OSIS
+                SiPiket Admin
               </a>
 
-              <span
-                className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-[11px] font-bold border ${
-                  isDeveloper
-                    ? 'bg-amber-100 text-amber-900 border-amber-300'
-                    : 'bg-sky-100 text-sky-900 border-sky-300'
-                }`}
+              <nav
+                aria-label="Navigasi Admin Panel"
+                className="hidden md:flex items-center gap-1 text-sm"
               >
-                {isDeveloper ? (
-                  <Lock className="w-3 h-3 text-amber-700" />
-                ) : (
-                  <ShieldCheck className="w-3 h-3 text-sky-700" />
+                {(
+                  [
+                    { id: 'admin_attendance', label: 'Verifikasi' },
+                    { id: 'schedules', label: 'Jadwal' },
+                    { id: 'members', label: 'Anggota' },
+                    { id: 'recap', label: 'Rekap' },
+                  ] as const
+                ).map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => switchTab(item.id)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
+                      activeTab === item.id
+                        ? 'bg-stone-900 text-white'
+                        : 'text-stone-600 hover:text-stone-900 hover:bg-stone-100'
+                    }`}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+                {isDeveloper && (
+                  <button
+                    type="button"
+                    data-testid="nav-kelola-akun"
+                    onClick={() => switchTab('accounts')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
+                      activeTab === 'accounts'
+                        ? 'bg-stone-900 text-white'
+                        : 'text-stone-600 hover:text-stone-900 hover:bg-stone-100'
+                    }`}
+                  >
+                    Kelola Akun
+                  </button>
                 )}
-                <span>{loggedInAccount.displayName}</span>
-                <span className="font-mono text-[10px] opacity-75">
-                  ({loggedInAccount.role.toUpperCase()})
-                </span>
-              </span>
+              </nav>
             </div>
 
-            <nav
-              aria-label="Navigasi Admin Panel"
-              className="hidden lg:flex items-center gap-5 text-sm font-bold text-stone-600"
-            >
-              <a
-                href="#admin-attendance"
-                onClick={(e) => {
-                  e.preventDefault();
-                  switchTab('admin_attendance');
-                }}
-                className={`transition-colors whitespace-nowrap shrink-0 py-1 ${
-                  activeTab === 'admin_attendance'
-                    ? 'text-orange-600 underline underline-offset-8 decoration-2 decoration-orange-500'
-                    : 'hover:text-stone-900'
-                }`}
-              >
-                Admin Presensi
-              </a>
-              <a
-                href="#schedules"
-                onClick={(e) => {
-                  e.preventDefault();
-                  switchTab('schedules');
-                }}
-                className={`transition-colors whitespace-nowrap shrink-0 py-1 ${
-                  activeTab === 'schedules'
-                    ? 'text-orange-600 underline underline-offset-8 decoration-2 decoration-orange-500'
-                    : 'hover:text-stone-900'
-                }`}
-              >
-                Kelola Jadwal
-              </a>
-              <a
-                href="#members"
-                onClick={(e) => {
-                  e.preventDefault();
-                  switchTab('members');
-                }}
-                className={`transition-colors whitespace-nowrap shrink-0 py-1 ${
-                  activeTab === 'members'
-                    ? 'text-orange-600 underline underline-offset-8 decoration-2 decoration-orange-500'
-                    : 'hover:text-stone-900'
-                }`}
-              >
-                Anggota Piket
-              </a>
-              <a
-                href="#recap"
-                onClick={(e) => {
-                  e.preventDefault();
-                  switchTab('recap');
-                }}
-                className={`transition-colors whitespace-nowrap shrink-0 py-1 ${
-                  activeTab === 'recap'
-                    ? 'text-orange-600 underline underline-offset-8 decoration-2 decoration-orange-500'
-                    : 'hover:text-stone-900'
-                }`}
-              >
-                Rekap Laporan
-              </a>
-              {isDeveloper && (
-                <a
-                  href="#accounts"
-                  data-testid="nav-kelola-akun"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    switchTab('accounts');
-                  }}
-                  className={`transition-colors whitespace-nowrap shrink-0 py-1 ${
-                    activeTab === 'accounts'
-                      ? 'text-orange-600 underline underline-offset-8 decoration-2 decoration-orange-500'
-                      : 'hover:text-stone-900'
-                  }`}
-                >
-                  Kelola Akun Admin
-                </a>
-              )}
-            </nav>
+            <div className="flex items-center gap-2.5 shrink-0">
+              <span className="hidden sm:inline-flex items-center gap-1.5 text-xs text-stone-500 font-medium">
+                {isDeveloper ? (
+                  <Lock className="w-3.5 h-3.5 text-stone-400" />
+                ) : (
+                  <ShieldCheck className="w-3.5 h-3.5 text-stone-400" />
+                )}
+                <span>{loggedInAccount.displayName}</span>
+              </span>
 
-            <div className="flex items-center gap-2 shrink-0">
               <button
                 type="button"
                 onClick={() => switchTab('display')}
-                className="btn-3d-secondary px-3 sm:px-3.5 py-2 text-xs font-bold whitespace-nowrap shrink-0"
+                className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-stone-200 bg-white hover:bg-stone-50 text-stone-700 whitespace-nowrap transition-colors"
               >
-                Lihat Display
+                Display Publik
               </button>
               <button
                 type="button"
                 data-testid="btn-logout-admin"
                 onClick={handleLogout}
-                className="px-3 py-2 text-xs font-bold rounded-xl border-2 border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 inline-flex items-center gap-1.5 transition-colors"
+                className="px-2.5 py-1.5 text-xs font-semibold rounded-lg border border-stone-200 bg-white hover:bg-rose-50 hover:text-rose-700 hover:border-rose-200 text-stone-600 inline-flex items-center gap-1.5 transition-colors"
                 title="Keluar dari Admin Panel"
               >
                 <LogOut className="w-3.5 h-3.5" />
@@ -938,66 +1133,43 @@ export default function App() {
             </div>
           </header>
 
-          {/* Mobile & Tablet Navigation Bar for Admin Panel */}
+          {/* Compact Mobile Navigation for Admin Panel */}
           <nav
             aria-label="Navigasi Mobile Admin"
-            className="lg:hidden flex items-center gap-1.5 bg-white border-b-2 border-[#F3E3D0] px-3 py-2 overflow-x-auto"
+            className="md:hidden flex items-center gap-1 bg-white border-b border-stone-200 px-3 py-2 overflow-x-auto"
           >
-            <button
-              type="button"
-              onClick={() => switchTab('admin_attendance')}
-              className={`px-3 py-1.5 text-xs font-bold rounded-xl whitespace-nowrap ${
-                activeTab === 'admin_attendance'
-                  ? 'bg-orange-500 text-white'
-                  : 'text-stone-600 hover:bg-orange-50'
-              }`}
-            >
-              Presensi
-            </button>
-            <button
-              type="button"
-              onClick={() => switchTab('schedules')}
-              className={`px-3 py-1.5 text-xs font-bold rounded-xl whitespace-nowrap ${
-                activeTab === 'schedules'
-                  ? 'bg-orange-500 text-white'
-                  : 'text-stone-600 hover:bg-orange-50'
-              }`}
-            >
-              Jadwal
-            </button>
-            <button
-              type="button"
-              onClick={() => switchTab('members')}
-              className={`px-3 py-1.5 text-xs font-bold rounded-xl whitespace-nowrap ${
-                activeTab === 'members'
-                  ? 'bg-orange-500 text-white'
-                  : 'text-stone-600 hover:bg-orange-50'
-              }`}
-            >
-              Anggota
-            </button>
-            <button
-              type="button"
-              onClick={() => switchTab('recap')}
-              className={`px-3 py-1.5 text-xs font-bold rounded-xl whitespace-nowrap ${
-                activeTab === 'recap'
-                  ? 'bg-orange-500 text-white'
-                  : 'text-stone-600 hover:bg-orange-50'
-              }`}
-            >
-              Rekap
-            </button>
+            {(
+              [
+                { id: 'admin_attendance', label: 'Verifikasi' },
+                { id: 'schedules', label: 'Jadwal' },
+                { id: 'members', label: 'Anggota' },
+                { id: 'recap', label: 'Rekap' },
+              ] as const
+            ).map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => switchTab(item.id)}
+                className={`px-3 py-1.5 text-xs font-semibold rounded-lg whitespace-nowrap ${
+                  activeTab === item.id
+                    ? 'bg-stone-900 text-white'
+                    : 'text-stone-600 hover:bg-stone-100'
+                }`}
+              >
+                {item.label}
+              </button>
+            ))}
             {isDeveloper && (
               <button
                 type="button"
                 onClick={() => switchTab('accounts')}
-                className={`px-3 py-1.5 text-xs font-bold rounded-xl whitespace-nowrap ${
+                className={`px-3 py-1.5 text-xs font-semibold rounded-lg whitespace-nowrap ${
                   activeTab === 'accounts'
-                    ? 'bg-orange-500 text-white'
-                    : 'text-stone-600 hover:bg-orange-50'
+                    ? 'bg-stone-900 text-white'
+                    : 'text-stone-600 hover:bg-stone-100'
                 }`}
               >
-                Kelola Akun
+                Akun
               </button>
             )}
           </nav>
@@ -1005,17 +1177,21 @@ export default function App() {
       )}
 
       {/* Main Content Container */}
-      <main className="flex-1 max-w-[1360px] w-full mx-auto px-3 sm:px-6 py-4 sm:py-6 space-y-5">
+      <main
+        className={`flex-1 w-full mx-auto px-3 sm:px-6 py-4 sm:py-6 space-y-5 ${
+          isAdminView ? 'max-w-5xl' : 'max-w-[1360px]'
+        }`}
+      >
         {feedbackBanner && (
           <div
             role="status"
-            className="px-4 py-3 bg-stone-900 text-amber-50 text-xs font-bold rounded-2xl border-2 border-stone-700 shadow-[0_4px_0_0_#1C1917] flex items-center justify-between"
+            className="px-4 py-2.5 bg-stone-900 text-white text-xs font-medium rounded-xl flex items-center justify-between"
           >
             <span>{feedbackBanner}</span>
             <button
               type="button"
               onClick={() => setFeedbackBanner(null)}
-              className="text-amber-300 hover:text-white ml-4 text-xs"
+              className="text-stone-300 hover:text-white ml-4 text-xs font-semibold"
             >
               Tutup
             </button>
@@ -1025,6 +1201,7 @@ export default function App() {
         {!isAdminView && (
           <PublicDisplayBoard
             todayStr={todayStr}
+            currentTimeHHMM={currentTimeHHMM}
             selectedDate={selectedDate}
             onSelectDate={setSelectedDate}
             nextPreviewDate={nextPreviewDate}
@@ -1033,7 +1210,10 @@ export default function App() {
             nextDaySchedules={resolvedNextDaySchedules}
             allSchedules={schedules}
             members={members}
+            swaps={swaps}
             attendanceRecords={attendanceRecords}
+            isLeaderboardEnabled={isLeaderboardEnabled}
+            onPublicRecordAttendance={handlePublicRecordAttendance}
           />
         )}
 
@@ -1049,10 +1229,15 @@ export default function App() {
             allSchedules={schedules}
             members={members}
             attendanceRecords={attendanceRecords}
+            isLeaderboardEnabled={isLeaderboardEnabled}
+            onToggleLeaderboardEnabled={handleToggleLeaderboardEnabled}
             onRecordAttendance={handleRecordAttendance}
+            onClearAttendance={handleClearAttendance}
             onMarkAllPresent={handleMarkAllPresent}
             onSaveDayOrShiftNote={handleSaveDayOrShiftNote}
             onClearDayOrShiftNote={handleClearDayOrShiftNote}
+            onSaveHolidayRange={handleSaveHolidayRange}
+            onDeleteHolidayRange={handleDeleteHolidayRange}
             onOpenSwapModal={(date, scheduleId, originalMemberId) =>
               setSwapModalState({
                 isOpen: true,
@@ -1101,10 +1286,13 @@ export default function App() {
         {isAdminView && activeTab === 'recap' && (
           <RecapReport
             todayStr={todayStr}
+            currentTimeHHMM={currentTimeHHMM}
             schedules={schedules}
             members={members}
             swaps={swaps}
             attendanceRecords={attendanceRecords}
+            isLeaderboardEnabled={isLeaderboardEnabled}
+            onToggleLeaderboardEnabled={handleToggleLeaderboardEnabled}
           />
         )}
 
@@ -1119,8 +1307,7 @@ export default function App() {
         )}
       </main>
 
-      {/* Subtle Floating Icon Trigger in Bottom-Right Corner when on Display View
-          (Icon-only, zero text buttons to other pages on the Display Board) */}
+      {/* Subtle Floating 3D Icon Trigger in Bottom-Right Corner when on Display View */}
       {!isAdminView && (
         <button
           type="button"
@@ -1128,7 +1315,7 @@ export default function App() {
           aria-label="Login Admin Panel OSIS"
           title="Login Admin Panel OSIS"
           data-testid="open-admin-panel-btn"
-          className="fixed bottom-4 right-4 z-40 w-10 h-10 rounded-2xl bg-white/80 hover:bg-white border-2 border-[#E7D5C0] shadow-[0_3px_0_0_#D8C0A6] flex items-center justify-center text-stone-500 hover:text-orange-600 transition-all opacity-50 hover:opacity-100"
+          className="btn-3d-secondary fixed bottom-4 right-4 z-40 w-10 h-10 flex items-center justify-center text-slate-600 hover:text-slate-900"
         >
           <Settings className="w-4 h-4" />
         </button>
@@ -1146,6 +1333,7 @@ export default function App() {
       {/* Swap / Change Schedule Modal */}
       {swapModalState.isOpen && (
         <SwapScheduleModal
+          todayStr={todayStr}
           initialDate={swapModalState.date}
           initialScheduleId={swapModalState.scheduleId}
           initialOriginalMemberId={swapModalState.originalMemberId}

@@ -5,6 +5,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Search,
+  Trophy,
 } from 'lucide-react';
 import {
   addDays,
@@ -12,6 +13,7 @@ import {
   formatFullDateId,
   getMonthRange,
   getWeekRange,
+  isSystemMetadataAttendanceRecord,
   STATUS_LABELS_ID,
   type AttendanceRecord,
   type OsisMember,
@@ -23,21 +25,28 @@ import {
   triggerPdfDownload,
 } from '../utils/pdfExporter';
 import { CharacterAvatar3D } from './CharacterAvatar3D';
+import { ViolationLeaderboard } from './ViolationLeaderboard';
 
 interface RecapReportProps {
   todayStr: string;
+  currentTimeHHMM: string;
   schedules: PiketSchedule[];
   members: OsisMember[];
   swaps: ScheduleSwap[];
   attendanceRecords: AttendanceRecord[];
+  isLeaderboardEnabled: boolean;
+  onToggleLeaderboardEnabled: (nextEnabled: boolean) => void;
 }
 
 export const RecapReport: React.FC<RecapReportProps> = ({
   todayStr,
+  currentTimeHHMM,
   schedules,
   members,
   swaps,
   attendanceRecords,
+  isLeaderboardEnabled,
+  onToggleLeaderboardEnabled,
 }) => {
   const [recapType, setRecapType] = useState<'mingguan' | 'bulanan'>(
     'mingguan'
@@ -61,7 +70,8 @@ export const RecapReport: React.FC<RecapReportProps> = ({
     members,
     swaps,
     attendanceRecords,
-    scheduleFilter
+    scheduleFilter,
+    { todayStr, currentTimeHHMM }
   );
 
   const filteredMemberRows = summary.memberRows.filter(
@@ -79,6 +89,7 @@ export const RecapReport: React.FC<RecapReportProps> = ({
 
   const filteredHistoryLogs = attendanceRecords
     .filter((rec) => {
+      if (isSystemMetadataAttendanceRecord(rec)) return false;
       const inRange =
         rec.date >= periodRange.startDate && rec.date <= periodRange.endDate;
       if (!inRange) return false;
@@ -150,6 +161,66 @@ export const RecapReport: React.FC<RecapReportProps> = ({
 
   return (
     <div className="space-y-6">
+      {/* Control Banner & Leaderboard Pelanggaran (Mingguan & Bulanan) */}
+      <div className="space-y-3">
+        <div className="bg-white border border-stone-200 rounded-xl px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <Trophy
+              className={`w-4 h-4 shrink-0 ${
+                isLeaderboardEnabled ? 'text-amber-600' : 'text-stone-400'
+              }`}
+            />
+            <div className="min-w-0">
+              <p className="text-xs font-bold text-stone-900">
+                Fitur Leaderboard Pelanggaran:{' '}
+                <span
+                  className={
+                    isLeaderboardEnabled
+                      ? 'text-emerald-700'
+                      : 'text-stone-500'
+                  }
+                >
+                  {isLeaderboardEnabled ? 'Aktif di Halaman Utama' : 'Nonaktif'}
+                </span>
+              </p>
+              <p className="text-[11px] text-stone-500">
+                {isLeaderboardEnabled
+                  ? 'Pengguna publik dapat melihat peringkat pelanggaran mingguan dan bulanan.'
+                  : 'Disembunyikan dari halaman utama pengguna. Aktifkan kembali kapan saja.'}
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            data-testid="btn-recap-toggle-leaderboard"
+            aria-pressed={isLeaderboardEnabled}
+            onClick={() => onToggleLeaderboardEnabled(!isLeaderboardEnabled)}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors whitespace-nowrap self-start sm:self-auto ${
+              isLeaderboardEnabled
+                ? 'border-stone-200 bg-white hover:bg-stone-50 text-stone-700'
+                : 'border-stone-900 bg-stone-900 hover:bg-stone-800 text-white'
+            }`}
+          >
+            {isLeaderboardEnabled
+              ? 'Nonaktifkan Leaderboard'
+              : 'Aktifkan Leaderboard'}
+          </button>
+        </div>
+
+        {isLeaderboardEnabled && (
+          <ViolationLeaderboard
+            todayStr={todayStr}
+            currentTimeHHMM={currentTimeHHMM}
+            schedules={schedules}
+            members={members}
+            swaps={swaps}
+            attendanceRecords={attendanceRecords}
+            defaultPeriod={recapType}
+          />
+        )}
+      </div>
+
       {/* Header & Period Switcher */}
       <section className="card-3d p-5 md:p-6 space-y-5">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b-2 border-[#F3E3D0] pb-5">

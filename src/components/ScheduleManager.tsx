@@ -27,7 +27,6 @@ import {
   type ScheduleMode,
   type ScheduleSwap,
 } from '../utils/piketLogic';
-import { banner3dImg } from '../assets/brandAssets';
 
 interface ScheduleManagerProps {
   todayStr: string;
@@ -470,6 +469,11 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
 
   const handleAddCustomDate = () => {
     if (!newCustomDateInput) return;
+    if (newCustomDateInput < todayStr) {
+      setFormError('Tidak dapat menambahkan jadwal untuk tanggal yang sudah berlalu.');
+      return;
+    }
+    setFormError('');
     if (!customDates.includes(newCustomDateInput)) {
       const nextDates = [...customDates, newCustomDateInput].sort();
       setCustomDates(nextDates);
@@ -587,30 +591,21 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
   });
 
   return (
-    <div className="space-y-5">
-      {/* 1. Simplified Top Header + Step-by-Step Week & Pos Filter Bar */}
-      <section className="card-3d p-4 sm:p-6 space-y-4">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b-2 border-[#F3E3D0]">
-          <div className="space-y-1">
-            <div className="flex flex-wrap items-center gap-2 text-xs font-bold text-orange-600">
-              <span>Pengaturan Jadwal Piket OSIS & MPK</span>
-              <span aria-hidden="true">·</span>
-              <span className="text-sky-700">
-                Menampilkan {filteredSchedules.length} dari {schedules.length}{' '}
-                jadwal
-              </span>
-            </div>
-            <h1 className="text-xl sm:text-2xl font-bold text-stone-900">
-              Kelola Jadwal & Custom Hari Piket
+    <div className="space-y-4">
+      {/* 1. Clean Top Header + Week & Pos Filter Bar */}
+      <section className="bg-white border border-stone-200 rounded-xl p-4 sm:p-5 space-y-4">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-3.5 border-b border-stone-200">
+          <div>
+            <h1 className="text-lg sm:text-xl font-bold text-stone-900">
+              Kelola Jadwal & Custom Hari
             </h1>
-            <p className="text-xs sm:text-sm text-stone-600">
-              Pilih <strong>Minggu (1–4)</strong>, atur{' '}
-              <strong>Custom Hari Aktif (Senin–Minggu)</strong>, atau buat{' '}
-              <strong>Jadwal Tanggal Khusus</strong>.
+            <p className="text-xs text-stone-500 mt-0.5">
+              Menampilkan {filteredSchedules.length} dari {schedules.length}{' '}
+              jadwal · Perubahan otomatis tersimpan ke semua perangkat.
             </p>
           </div>
 
-          <div className="grid grid-cols-2 sm:flex flex-wrap items-center gap-2 shrink-0">
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
             {schedules.length > 0 && members.length > 1 && (
               <button
                 type="button"
@@ -620,10 +615,10 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
                     filteredSchedules[0]?.id || schedules[0]?.id || ''
                   )
                 }
-                className="btn-3d-secondary inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-bold whitespace-nowrap"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-stone-200 bg-white hover:bg-stone-50 text-stone-700 whitespace-nowrap"
               >
-                <ArrowLeftRight className="w-3.5 h-3.5 text-orange-500 shrink-0" />
-                <span>Tukar Piket</span>
+                <ArrowLeftRight className="w-3.5 h-3.5 text-stone-500 shrink-0" />
+                <span>Tukar Petugas</span>
               </button>
             )}
 
@@ -631,42 +626,42 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
               type="button"
               data-testid="btn-create-custom-date-schedule"
               onClick={() => openCreateForm('custom')}
-              className="btn-3d-sky inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-bold whitespace-nowrap"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-stone-200 bg-white hover:bg-stone-50 text-stone-700 whitespace-nowrap"
             >
-              <CalendarDays className="w-3.5 h-3.5 shrink-0" />
-              <span>+ Jadwal Tanggal Khusus</span>
+              <CalendarDays className="w-3.5 h-3.5 text-stone-500 shrink-0" />
+              <span>+ Tanggal Khusus</span>
             </button>
 
             <button
               type="button"
               data-testid="btn-create-schedule"
               onClick={() => openCreateForm('mingguan')}
-              className="col-span-2 sm:col-span-1 btn-3d-primary inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-bold whitespace-nowrap"
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-stone-900 hover:bg-stone-800 text-white whitespace-nowrap"
             >
-              <Plus className="w-4 h-4 shrink-0" />
-              <span>Tambah Jadwal Baru</span>
+              <Plus className="w-3.5 h-3.5 shrink-0" />
+              <span>Tambah Jadwal</span>
             </button>
           </div>
         </div>
 
-        {/* Clean 3-Part Filter Toolbar: 1) Siklus Minggu 1-4, 2) Pos Piket, 3) Cari Petugas */}
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-          <div className="flex flex-col sm:flex-row sm:items-center gap-2.5">
+        {/* Clean 3-Part Filter Toolbar */}
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2">
             {/* Step 1: Pilih Minggu */}
-            <div className="grid grid-cols-5 sm:flex items-center gap-1 p-1 bg-[#FFF3E0] border-2 border-[#EBD5B8] rounded-xl">
+            <div className="grid grid-cols-5 sm:flex items-center gap-1 p-1 bg-stone-100 rounded-lg">
               {[1, 2, 3, 4].map((wNum) => (
                 <button
                   key={wNum}
                   type="button"
                   data-testid={`filter-week-${wNum}`}
                   onClick={() => setSelectedWeek(wNum)}
-                  className={`px-2 sm:px-3 py-1.5 text-[11px] sm:text-xs font-bold rounded-lg transition-all text-center whitespace-nowrap ${
+                  className={`px-2 sm:px-2.5 py-1 text-xs font-semibold rounded-md transition-colors text-center whitespace-nowrap ${
                     selectedWeek === wNum
-                      ? 'bg-orange-500 text-white shadow-xs'
-                      : 'text-stone-700 hover:bg-white/80'
+                      ? 'bg-stone-900 text-white'
+                      : 'text-stone-600 hover:text-stone-900'
                   }`}
                 >
-                  <span className="sm:hidden">Mgg {wNum}</span>
+                  <span className="sm:hidden">M{wNum}</span>
                   <span className="hidden sm:inline">Minggu {wNum}</span>
                 </button>
               ))}
@@ -674,18 +669,18 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
                 type="button"
                 data-testid="filter-week-all"
                 onClick={() => setSelectedWeek('all')}
-                className={`px-2 sm:px-3 py-1.5 text-[11px] sm:text-xs font-bold rounded-lg transition-all text-center whitespace-nowrap ${
+                className={`px-2 sm:px-2.5 py-1 text-xs font-semibold rounded-md transition-colors text-center whitespace-nowrap ${
                   selectedWeek === 'all'
-                    ? 'bg-stone-900 text-white shadow-xs'
-                    : 'text-stone-600 hover:bg-white/80'
+                    ? 'bg-stone-900 text-white'
+                    : 'text-stone-600 hover:text-stone-900'
                 }`}
               >
-                Semua ({schedules.length})
+                Semua
               </button>
             </div>
 
             {/* Step 2: Pilih Pos */}
-            <div className="grid grid-cols-4 sm:flex items-center gap-1 p-1 bg-[#FFF8EE] border-2 border-[#F3E3D0] rounded-xl">
+            <div className="grid grid-cols-4 sm:flex items-center gap-1 p-1 bg-stone-100 rounded-lg">
               {(
                 [
                   { id: 'all', label: 'Semua Pos' },
@@ -698,10 +693,10 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
                   key={pos.id}
                   type="button"
                   onClick={() => setPosCategory(pos.id)}
-                  className={`px-2 sm:px-2.5 py-1.5 text-[11px] sm:text-xs font-bold rounded-lg transition-all text-center whitespace-nowrap ${
+                  className={`px-2 sm:px-2.5 py-1 text-xs font-semibold rounded-md transition-colors text-center whitespace-nowrap ${
                     posCategory === pos.id
-                      ? 'bg-stone-900 text-white shadow-xs'
-                      : 'text-stone-600 hover:bg-white/80'
+                      ? 'bg-white text-stone-900 shadow-xs'
+                      : 'text-stone-600 hover:text-stone-900'
                   }`}
                 >
                   {pos.label}
@@ -711,22 +706,22 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
           </div>
 
           {/* Step 3: Search Officer or Pos */}
-          <div className="relative w-full lg:w-64 shrink-0">
-            <Search className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+          <div className="relative w-full lg:w-60 shrink-0">
+            <Search className="w-3.5 h-3.5 text-stone-400 absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
               aria-label="Cari jadwal atau nama petugas"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Cari nama petugas / kelas..."
-              className="w-full pl-9 pr-8 py-2 text-xs font-medium bg-white border-2 border-[#EBD5B8] rounded-xl text-stone-900 placeholder:text-stone-400 focus:outline-none focus:border-orange-400"
+              placeholder="Cari petugas atau kelas..."
+              className="w-full pl-8 pr-7 py-1.5 text-xs bg-white border border-stone-200 rounded-lg text-stone-900 placeholder:text-stone-400 focus:outline-none focus:border-stone-400"
             />
             {searchQuery && (
               <button
                 type="button"
                 onClick={() => setSearchQuery('')}
                 aria-label="Hapus pencarian"
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-700 p-1"
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-700 p-0.5"
               >
                 <X className="w-3.5 h-3.5" />
               </button>
@@ -737,21 +732,13 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
 
       {/* 2. Clean Schedule Cards for the Selected Week */}
       {filteredSchedules.length === 0 ? (
-        <section className="card-3d p-8 text-center space-y-4">
-          <div className="max-w-xs mx-auto rounded-2xl overflow-hidden border-2 border-[#F3E3D0]">
-            <img
-              src={banner3dImg}
-              alt="Ilustrasi 3D Jadwal OSIS"
-              className="w-full h-36 object-cover"
-            />
-          </div>
+        <section className="bg-white border border-stone-200 rounded-xl p-8 text-center space-y-3">
           <div className="space-y-1 max-w-md mx-auto">
-            <h2 className="text-base sm:text-lg font-bold text-stone-900">
-              Tidak Ada Jadwal yang Cocok dengan Filter
+            <h2 className="text-sm font-bold text-stone-900">
+              Tidak ada jadwal yang cocok dengan filter
             </h2>
-            <p className="text-xs text-stone-600">
-              Coba pilih minggu lain atau klik tombol di bawah untuk menampilkan
-              semua jadwal.
+            <p className="text-xs text-stone-500">
+              Pilih minggu lain atau tampilkan semua jadwal.
             </p>
           </div>
           <button
@@ -761,9 +748,9 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
               setPosCategory('all');
               setSearchQuery('');
             }}
-            className="btn-3d-secondary px-4 py-2 text-xs font-bold"
+            className="px-3.5 py-1.5 text-xs font-semibold rounded-lg border border-stone-200 bg-white hover:bg-stone-50 text-stone-700"
           >
-            Reset Filter Jadwal
+            Reset Filter
           </button>
         </section>
       ) : (
@@ -784,54 +771,47 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
             });
 
             return (
-              <article key={sch.id} className="card-3d overflow-hidden">
-                {/* Compact, Clear Card Header */}
-                <div
-                  className={`p-4 sm:p-5 border-b-2 ${accent.bg} flex flex-col sm:flex-row sm:items-center justify-between gap-3`}
-                >
-                  <div className="space-y-1">
-                    <div className="flex flex-wrap items-center gap-2 text-xs font-bold">
+              <article
+                key={sch.id}
+                className="bg-white border border-stone-200 rounded-xl overflow-hidden"
+              >
+                {/* Clean Card Header */}
+                <div className="px-4 sm:px-5 py-3.5 border-b border-stone-200 bg-stone-50/70 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="space-y-0.5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h2 className="text-sm sm:text-base font-bold text-stone-900">
+                        {sch.title}
+                      </h2>
                       <span
-                        className={`px-2.5 py-0.5 rounded-lg text-[11px] ${accent.badge}`}
+                        className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${accent.badge}`}
                       >
                         {sch.mode === 'custom'
                           ? 'Tanggal Khusus'
                           : formatWeekCycleLabel(sch.activeWeeks)}
                       </span>
-                      <span className="font-mono text-stone-700 inline-flex items-center gap-1 tabular-nums">
-                        <Clock className="w-3.5 h-3.5 text-orange-500" />
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-stone-500">
+                      <span className="font-mono tabular-nums inline-flex items-center gap-1">
+                        <Clock className="w-3 h-3 text-stone-400" />
                         {sch.startTime} – {sch.endTime} WIB
                       </span>
-                      <span aria-hidden="true" className="text-stone-300">
-                        ·
-                      </span>
-                      <span className="text-stone-600 inline-flex items-center gap-1">
-                        <MapPin className="w-3.5 h-3.5 text-orange-500" />
+                      <span aria-hidden="true">·</span>
+                      <span className="inline-flex items-center gap-1">
+                        <MapPin className="w-3 h-3 text-stone-400" />
                         {sch.location}
-                      </span>
-                      <span aria-hidden="true" className="text-stone-300">
-                        ·
-                      </span>
-                      <span className="text-stone-600 font-semibold">
-                        {MODE_LABELS[sch.mode]}
                       </span>
                       {sch.mode !== 'custom' && (
                         <>
-                          <span aria-hidden="true" className="text-stone-300">
-                            ·
-                          </span>
-                          <span className="text-sky-800 bg-white/80 border border-sky-200 px-2 py-0.5 rounded-md text-[11px]">
-                            Hari: {formatActiveDaysLabel(effectiveActiveDays)}
+                          <span aria-hidden="true">·</span>
+                          <span>
+                            {formatActiveDaysLabel(effectiveActiveDays)}
                           </span>
                         </>
                       )}
                     </div>
-                    <h2 className="text-lg font-bold text-stone-900">
-                      {sch.title}
-                    </h2>
                   </div>
 
-                  {/* Card Actions: Custom Hari, Edit & Delete */}
+                  {/* Card Actions */}
                   <div className="flex flex-wrap items-center gap-2 shrink-0">
                     {sch.mode !== 'custom' && (
                       <button
@@ -842,13 +822,13 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
                             isCustomDaysOpen ? null : sch.id
                           )
                         }
-                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl border-2 transition-colors whitespace-nowrap ${
+                        className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold rounded-lg border transition-colors whitespace-nowrap ${
                           isCustomDaysOpen
-                            ? 'bg-orange-500 border-orange-600 text-white'
-                            : 'bg-white border-[#E7D5C0] text-stone-700 hover:bg-orange-50'
+                            ? 'bg-stone-900 border-stone-900 text-white'
+                            : 'bg-white border-stone-200 text-stone-700 hover:bg-stone-100'
                         }`}
                       >
-                        <Calendar className="w-3.5 h-3.5 text-orange-500 shrink-0" />
+                        <Calendar className="w-3.5 h-3.5 shrink-0" />
                         <span>Custom Hari</span>
                       </button>
                     )}
@@ -856,17 +836,17 @@ export const ScheduleManager: React.FC<ScheduleManagerProps> = ({
                     <button
                       type="button"
                       onClick={() => openEditForm(sch)}
-                      className="btn-3d-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold whitespace-nowrap"
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold rounded-lg border border-stone-200 bg-white hover:bg-stone-100 text-stone-700 whitespace-nowrap"
                     >
-                      <Edit3 className="w-3.5 h-3.5 text-sky-700" />
-                      <span>Edit Jadwal & Petugas</span>
+                      <Edit3 className="w-3.5 h-3.5 text-stone-500" />
+                      <span>Edit</span>
                     </button>
 
                     <button
                       type="button"
                       onClick={() => onDeleteSchedule(sch.id)}
                       aria-label={`Hapus ${sch.title}`}
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-bold text-rose-700 bg-rose-50 border-2 border-rose-200 hover:bg-rose-100 rounded-xl transition-colors whitespace-nowrap"
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-rose-700 bg-white border border-stone-200 hover:bg-rose-50 hover:border-rose-200 rounded-lg transition-colors whitespace-nowrap"
                       title="Hapus Jadwal Ini"
                     >
                       <Trash2 className="w-3.5 h-3.5" />

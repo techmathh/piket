@@ -113,8 +113,8 @@ export function createInitialSchedules(_todayStr: string): PiketSchedule[] {
       title: 'Jadwal Jaga Gerbang',
       description: 'Rotasi Mingguan Petugas Jaga Gerbang Utama — Minggu 1',
       location: 'Gerbang Utama Sekolah',
-      startTime: '06:15',
-      endTime: '07:00',
+      startTime: '06:00',
+      endTime: '09:15',
       mode: 'harian',
       activeWeeks: [1],
       tasks: [
@@ -142,8 +142,8 @@ export function createInitialSchedules(_todayStr: string): PiketSchedule[] {
       title: 'Jadwal Jaga Gerbang',
       description: 'Rotasi Mingguan Petugas Jaga Gerbang Utama — Minggu 2',
       location: 'Gerbang Utama Sekolah',
-      startTime: '06:15',
-      endTime: '07:00',
+      startTime: '06:00',
+      endTime: '09:15',
       mode: 'harian',
       activeWeeks: [2],
       tasks: [
@@ -171,8 +171,8 @@ export function createInitialSchedules(_todayStr: string): PiketSchedule[] {
       title: 'Jadwal Jaga Gerbang',
       description: 'Rotasi Mingguan Petugas Jaga Gerbang Utama — Minggu 3',
       location: 'Gerbang Utama Sekolah',
-      startTime: '06:15',
-      endTime: '07:00',
+      startTime: '06:00',
+      endTime: '09:15',
       mode: 'harian',
       activeWeeks: [3],
       tasks: [
@@ -200,8 +200,8 @@ export function createInitialSchedules(_todayStr: string): PiketSchedule[] {
       title: 'Jadwal Jaga Gerbang',
       description: 'Rotasi Mingguan Petugas Jaga Gerbang Utama — Minggu 4',
       location: 'Gerbang Utama Sekolah',
-      startTime: '06:15',
-      endTime: '07:00',
+      startTime: '06:00',
+      endTime: '09:15',
       mode: 'harian',
       activeWeeks: [4],
       tasks: [
@@ -233,8 +233,8 @@ export function createInitialSchedules(_todayStr: string): PiketSchedule[] {
       title: 'Jadwal Piket Warsis',
       description: 'Petugas pelayanan, stok, dan kebersihan Warung OSIS (Warsis) — Minggu 1',
       location: 'Warung OSIS (Warsis)',
-      startTime: '09:30',
-      endTime: '10:15',
+      startTime: '09:15',
+      endTime: '14:15',
       mode: 'mingguan',
       activeWeeks: [1],
       tasks: [
@@ -261,8 +261,8 @@ export function createInitialSchedules(_todayStr: string): PiketSchedule[] {
       title: 'Jadwal Piket Warsis',
       description: 'Petugas pelayanan, stok, dan kebersihan Warung OSIS (Warsis) — Minggu 2',
       location: 'Warung OSIS (Warsis)',
-      startTime: '09:30',
-      endTime: '10:15',
+      startTime: '09:15',
+      endTime: '14:15',
       mode: 'mingguan',
       activeWeeks: [2],
       tasks: [
@@ -289,8 +289,8 @@ export function createInitialSchedules(_todayStr: string): PiketSchedule[] {
       title: 'Jadwal Piket Warsis',
       description: 'Petugas pelayanan, stok, dan kebersihan Warung OSIS (Warsis) — Minggu 3',
       location: 'Warung OSIS (Warsis)',
-      startTime: '09:30',
-      endTime: '10:15',
+      startTime: '09:15',
+      endTime: '14:15',
       mode: 'mingguan',
       activeWeeks: [3],
       tasks: [
@@ -317,8 +317,8 @@ export function createInitialSchedules(_todayStr: string): PiketSchedule[] {
       title: 'Jadwal Piket Warsis',
       description: 'Petugas pelayanan, stok, dan kebersihan Warung OSIS (Warsis) — Minggu 4',
       location: 'Warung OSIS (Warsis)',
-      startTime: '09:30',
-      endTime: '10:15',
+      startTime: '09:15',
+      endTime: '14:15',
       mode: 'mingguan',
       activeWeeks: [4],
       tasks: [
@@ -350,7 +350,7 @@ export function createInitialSchedules(_todayStr: string): PiketSchedule[] {
       description: 'Petugas pencatatan presensi dan ketertiban ibadah shalat berjamaah — Minggu 1',
       location: 'Masjid / Musholla Sekolah',
       startTime: '11:45',
-      endTime: '12:30',
+      endTime: '16:00',
       mode: 'mingguan',
       activeWeeks: [1],
       tasks: [
@@ -378,7 +378,7 @@ export function createInitialSchedules(_todayStr: string): PiketSchedule[] {
       description: 'Petugas pencatatan presensi dan ketertiban ibadah shalat berjamaah — Minggu 2',
       location: 'Masjid / Musholla Sekolah',
       startTime: '11:45',
-      endTime: '12:30',
+      endTime: '16:00',
       mode: 'mingguan',
       activeWeeks: [2],
       tasks: [
@@ -406,7 +406,7 @@ export function createInitialSchedules(_todayStr: string): PiketSchedule[] {
       description: 'Petugas pencatatan presensi dan ketertiban ibadah shalat berjamaah — Minggu 3',
       location: 'Masjid / Musholla Sekolah',
       startTime: '11:45',
-      endTime: '12:30',
+      endTime: '16:00',
       mode: 'mingguan',
       activeWeeks: [3],
       tasks: [
@@ -434,7 +434,7 @@ export function createInitialSchedules(_todayStr: string): PiketSchedule[] {
       description: 'Petugas pencatatan presensi dan ketertiban ibadah shalat berjamaah — Minggu 4',
       location: 'Masjid / Musholla Sekolah',
       startTime: '11:45',
-      endTime: '12:30',
+      endTime: '16:00',
       mode: 'mingguan',
       activeWeeks: [4],
       tasks: [

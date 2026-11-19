@@ -698,4 +698,600 @@ test('sanitizes schedule payloads for Firestore and prioritizes dailyMembers whe
   assert.deepEqual(baseOnMonday.memberIds, ['osis-faridathun', 'm2']);
 });
 
+test('enforces strict today-only edit lock for past and future dates', async () => {
+  const { getScheduleDateEditStatus } = await import('./piketLogic');
+
+  const past = getScheduleDateEditStatus('2026-11-10', '2026-11-11');
+  assert.equal(past.canEdit, false);
+  assert.equal(past.state, 'past');
+
+  const today = getScheduleDateEditStatus('2026-11-11', '2026-11-11');
+  assert.equal(today.canEdit, true);
+  assert.equal(today.state, 'today');
+
+  const future = getScheduleDateEditStatus('2026-11-12', '2026-11-11');
+  assert.equal(future.canEdit, false);
+  assert.equal(future.state, 'future');
+});
+
+test('evaluates public attendance rules for Jaga Gerbang (06:45), Shalat (2x), Warsis (2x 09:15 & 12:30), Izin, and Alfa', async () => {
+  const {
+    evaluatePublicAttendanceSubmission,
+    parseCompletedSessionsFromNote,
+  } = await import('./piketLogic');
+
+  // 1. Jaga Gerbang <= 06:45 -> Hadir
+  const gerbangOnTime = evaluatePublicAttendanceSubmission({
+    scheduleTitle: 'Jaga Gerbang (Minggu 1)',
+    choice: 'hadir',
+    currentTimeHHMM: '06:44',
+  });
+  assert.equal(gerbangOnTime.valid, true);
+  assert.equal(gerbangOnTime.status, 'hadir');
+  assert.equal(gerbangOnTime.autoDowngradedToLate, false);
+
+  // 2. Jaga Gerbang > 06:45 -> automatically Terlambat
+  const gerbangLate = evaluatePublicAttendanceSubmission({
+    scheduleTitle: 'Jaga Gerbang (Minggu 1)',
+    choice: 'hadir',
+    currentTimeHHMM: '06:46',
+  });
+  assert.equal(gerbangLate.valid, true);
+  assert.equal(gerbangLate.status, 'terlambat');
+  assert.equal(gerbangLate.autoDowngradedToLate, true);
+  assert.equal(gerbangLate.note.includes('06:45'), true);
+
+  // 3. Jaga Shalat 1x (Dzuhur only) -> automatically Terlambat
+  const shalatOne = evaluatePublicAttendanceSubmission({
+    scheduleTitle: 'Petugas Absensi Shalat (Minggu 1)',
+    choice: 'hadir',
+    currentTimeHHMM: '12:15',
+    selectedSessions: ['dzuhur'],
+  });
+  assert.equal(shalatOne.valid, true);
+  assert.equal(shalatOne.status, 'terlambat');
+  assert.equal(shalatOne.autoDowngradedToLate, true);
+  assert.deepEqual(
+    parseCompletedSessionsFromNote(
+      'Petugas Absensi Shalat (Minggu 1)',
+      shalatOne.note
+    ),
+    ['dzuhur']
+  );
+
+  // 4. Jaga Shalat 2x (Dzuhur & Ashar) -> Hadir
+  const shalatTwo = evaluatePublicAttendanceSubmission({
+    scheduleTitle: 'Petugas Absensi Shalat (Minggu 1)',
+    choice: 'hadir',
+    currentTimeHHMM: '15:20',
+    selectedSessions: ['dzuhur', 'ashar'],
+  });
+  assert.equal(shalatTwo.valid, true);
+  assert.equal(shalatTwo.status, 'hadir');
+  assert.equal(shalatTwo.autoDowngradedToLate, false);
+
+  // 5. Piket Warsis 1x (Istirahat 1 09:15) -> Terlambat, 2x (09:15 & 12:30) -> Hadir
+  const warsisOne = evaluatePublicAttendanceSubmission({
+    scheduleTitle: 'Piket Warsis (Minggu 1)',
+    choice: 'hadir',
+    currentTimeHHMM: '09:20',
+    selectedSessions: ['istirahat1'],
+  });
+  assert.equal(warsisOne.valid, true);
+  assert.equal(warsisOne.status, 'terlambat');
+
+  const warsisTwo = evaluatePublicAttendanceSubmission({
+    scheduleTitle: 'Piket Warsis (Minggu 1)',
+    choice: 'hadir',
+    currentTimeHHMM: '12:35',
+    selectedSessions: ['istirahat1', 'istirahat2'],
+  });
+  assert.equal(warsisTwo.valid, true);
+  assert.equal(warsisTwo.status, 'hadir');
+
+  // 6. Izin requires non-empty keterangan
+  const izinEmpty = evaluatePublicAttendanceSubmission({
+    scheduleTitle: 'Jaga Gerbang (Minggu 1)',
+    choice: 'izin',
+    currentTimeHHMM: '06:30',
+    izinReason: '   ',
+  });
+  assert.equal(izinEmpty.valid, false);
+
+  const izinValid = evaluatePublicAttendanceSubmission({
+    scheduleTitle: 'Jaga Gerbang (Minggu 1)',
+    choice: 'izin',
+    currentTimeHHMM: '06:30',
+    izinReason: 'Izin lomba olimpiade',
+  });
+  assert.equal(izinValid.valid, true);
+  assert.equal(izinValid.status, 'izin');
+  assert.equal(izinValid.note, 'Izin lomba olimpiade');
+
+  // 7. Alfa maps to tidak_piket
+  const alfaRes = evaluatePublicAttendanceSubmission({
+    scheduleTitle: 'Jaga Gerbang (Minggu 1)',
+    choice: 'alfa',
+    currentTimeHHMM: '06:30',
+  });
+  assert.equal(alfaRes.valid, true);
+  assert.equal(alfaRes.status, 'tidak_piket');
+});
+
+test('distinguishes public check-ins, admin verifications, and "Dia bohong <alasan>" records with self-claim sub-caption', async () => {
+  const {
+    PUBLIC_SELF_ATTENDANCE_RECORDER,
+    buildAdminVerificationNote,
+    formatAdminVerifierName,
+    formatSelfAttendanceClaim,
+    isAttendanceVerifiedByAdmin,
+    isFakeAttendanceRecord,
+    isPublicSelfAttendance,
+    parseLieAttendanceRecord,
+  } = await import('./piketLogic');
+
+  const publicRec: AttendanceRecord = {
+    id: 'att-pub-1',
+    date: '2026-11-11',
+    scheduleId: 'sch-1',
+    memberId: 'm1',
+    status: 'hadir',
+    checkInTime: '06:40',
+    note: 'Hadir tepat waktu',
+    recordedBy: PUBLIC_SELF_ATTENDANCE_RECORDER,
+  };
+  assert.equal(isPublicSelfAttendance(publicRec), true);
+  assert.equal(isAttendanceVerifiedByAdmin(publicRec), false);
+  assert.equal(isFakeAttendanceRecord(publicRec), false);
+
+  const selfClaim = formatSelfAttendanceClaim(publicRec);
+  assert.equal(selfClaim, 'Hadir (06:40 WIB)');
+
+  const lieNote = buildAdminVerificationNote(
+    'tidak_piket',
+    'hadir',
+    true,
+    'tidak ada di lokasi gerbang',
+    selfClaim
+  );
+  assert.equal(
+    lieNote,
+    'Dia bohong tidak ada di lokasi gerbang [Absen sendiri: Hadir (06:40 WIB)]'
+  );
+
+  const adminFlaggedRec: AttendanceRecord = {
+    ...publicRec,
+    status: 'tidak_piket',
+    checkInTime: '-',
+    note: lieNote,
+    recordedBy: formatAdminVerifierName('Developer Sistem OSIS'),
+  };
+  assert.equal(isPublicSelfAttendance(adminFlaggedRec), false);
+  assert.equal(isAttendanceVerifiedByAdmin(adminFlaggedRec), true);
+  assert.equal(isFakeAttendanceRecord(adminFlaggedRec), true);
+
+  const parsed = parseLieAttendanceRecord(adminFlaggedRec);
+  assert.equal(parsed.isLie, true);
+  assert.equal(parsed.headline, 'Dia bohong tidak ada di lokasi gerbang');
+  assert.equal(parsed.lieReason, 'tidak ada di lokasi gerbang');
+  assert.equal(parsed.selfClaim, 'Hadir (06:40 WIB)');
+
+  // Legacy Absensi Palsu records remain gracefully parsed into "Dia bohong ..."
+  const legacyParsed = parseLieAttendanceRecord({
+    ...adminFlaggedRec,
+    note: 'Alfa (Absensi Palsu — klaim Hadir): tidak berada di pos',
+  });
+  assert.equal(legacyParsed.isLie, true);
+  assert.equal(legacyParsed.headline, 'Dia bohong tidak berada di pos');
+  assert.equal(legacyParsed.selfClaim, 'Hadir');
+});
+
+test('enforces official pos attendance time windows (Gerbang 06:00-09:15, Warsis 09:15-14:15, Shalat 11:45-16:00)', async () => {
+  const { createInitialSchedules } = await import('../data/initialData');
+  const { getPosAttendanceWindowStatus } = await import('./piketLogic');
+
+  const schedules = createInitialSchedules('2026-11-11');
+  const gerbang = schedules.find((s) => s.id === 'sch-gerbang-m1')!;
+  const warsis = schedules.find((s) => s.id === 'sch-warsis-m1')!;
+  const shalat = schedules.find((s) => s.id === 'sch-shalat-m1')!;
+
+  assert.equal(gerbang.startTime, '06:00');
+  assert.equal(gerbang.endTime, '09:15');
+  assert.equal(warsis.startTime, '09:15');
+  assert.equal(warsis.endTime, '14:15');
+  assert.equal(shalat.startTime, '11:45');
+  assert.equal(shalat.endTime, '16:00');
+
+  assert.equal(getPosAttendanceWindowStatus(gerbang, '05:59').state, 'before');
+  assert.equal(getPosAttendanceWindowStatus(gerbang, '06:00').isOpen, true);
+  assert.equal(getPosAttendanceWindowStatus(gerbang, '09:15').isOpen, true);
+  assert.equal(getPosAttendanceWindowStatus(gerbang, '09:16').state, 'closed');
+
+  assert.equal(getPosAttendanceWindowStatus(warsis, '09:14').state, 'before');
+  assert.equal(getPosAttendanceWindowStatus(warsis, '12:30').isOpen, true);
+  assert.equal(getPosAttendanceWindowStatus(warsis, '14:16').state, 'closed');
+
+  assert.equal(getPosAttendanceWindowStatus(shalat, '11:44').state, 'before');
+  assert.equal(getPosAttendanceWindowStatus(shalat, '15:59').isOpen, true);
+  assert.equal(getPosAttendanceWindowStatus(shalat, '16:01').state, 'closed');
+});
+
+test('manages per-category date-range holiday rules (Libur Piket) and excludes them from recap', async () => {
+  const {
+    createHolidayRangeRecord,
+    formatShortDateRangeId,
+    getActiveHolidaysForDate,
+    getHolidayForScheduleOnDate,
+    getHolidayRangeRules,
+  } = await import('./piketLogic');
+
+  const warsisHoliday = createHolidayRangeRecord(
+    'warsis',
+    '2026-11-11',
+    '2026-11-13',
+    'Classmeeting Sekolah',
+    'Verifikasi Admin: Developer Sistem OSIS',
+    'holiday-test-warsis'
+  );
+
+  const allHoliday = createHolidayRangeRecord(
+    'all',
+    '2026-11-16',
+    '2026-11-16',
+    'Libur Nasional',
+    'Verifikasi Admin: Developer Sistem OSIS',
+    'holiday-test-all'
+  );
+
+  const records = [warsisHoliday, allHoliday];
+  const rules = getHolidayRangeRules(records);
+  assert.equal(rules.length, 2);
+  assert.equal(rules[0].category, 'warsis');
+  assert.equal(rules[0].startDate, '2026-11-11');
+  assert.equal(rules[0].endDate, '2026-11-13');
+  assert.equal(formatShortDateRangeId('2026-11-11', '2026-11-13'), '11 – 13 Nov 2026');
+  assert.equal(formatShortDateRangeId('2026-11-16', '2026-11-16'), '16 Nov 2026');
+
+  // On 2026-11-12, only Warsis is on holiday; Gerbang and Shalat remain active
+  assert.equal(getActiveHolidaysForDate('2026-11-12', records).length, 1);
+  assert.equal(
+    getHolidayForScheduleOnDate('2026-11-12', 'Piket Warsis (Minggu 2)', records)?.reason,
+    'Classmeeting Sekolah'
+  );
+  assert.equal(
+    getHolidayForScheduleOnDate('2026-11-12', 'Jaga Gerbang (Minggu 2)', records),
+    null
+  );
+  assert.equal(
+    getHolidayForScheduleOnDate('2026-11-12', 'Petugas Absensi Shalat (Minggu 2)', records),
+    null
+  );
+
+  // On 2026-11-16, 'all' holiday applies to every category
+  assert.equal(
+    getHolidayForScheduleOnDate('2026-11-16', 'Jaga Gerbang (Minggu 3)', records)?.reason,
+    'Libur Nasional'
+  );
+
+  // Period recap excludes Warsis slots on 2026-11-11..13 when Warsis is on holiday
+  const warsisSchedule: PiketSchedule = {
+    ...weeklySchedule,
+    id: 'sch-warsis-test',
+    title: 'Piket Warsis (Minggu 2)',
+    weeklyAssignments: {
+      1: ['m1'], // Nov 9 (active)
+      3: ['m1'], // Nov 11 (holiday!)
+      4: ['m2'], // Nov 12 (holiday!)
+      5: ['m3'], // Nov 13 (holiday!)
+    },
+  };
+  const recap = calculatePeriodRecap(
+    '2026-11-09',
+    '2026-11-13',
+    [warsisSchedule],
+    sampleMembers,
+    [],
+    records
+  );
+  assert.equal(recap.totalDutySlots, 1); // Only Nov 9 counted; Nov 11, 12, 13 skipped due to holiday
+});
+
+test('uses revised Istirahat Kedua time 11:45 WIB for Piket Warsis', async () => {
+  const {
+    getPosRuleInfo,
+    evaluatePublicAttendanceSubmission,
+    parseCompletedSessionsFromNote,
+  } = await import('./piketLogic');
+
+  const warsisRule = getPosRuleInfo('Jadwal Piket Warsis');
+  assert.equal(warsisRule.category, 'warsis');
+  assert.equal(warsisRule.ruleSummary.includes('11:45'), true);
+  assert.equal(warsisRule.requiredSessions?.[0].timeLabel, '09:15 WIB');
+  assert.equal(warsisRule.requiredSessions?.[1].timeLabel, '11:45 WIB');
+
+  const both = evaluatePublicAttendanceSubmission({
+    scheduleTitle: 'Jadwal Piket Warsis',
+    choice: 'hadir',
+    currentTimeHHMM: '11:50',
+    selectedSessions: ['istirahat1', 'istirahat2'],
+  });
+  assert.equal(both.status, 'hadir');
+  assert.equal(both.note.includes('11:45 WIB'), true);
+  assert.deepEqual(
+    parseCompletedSessionsFromNote('Jadwal Piket Warsis', both.note),
+    ['istirahat1', 'istirahat2']
+  );
+});
+
+test('automatically marks unrecorded duty slots as Alfa after schedule endTime or on past dates (excluding holidays)', async () => {
+  const { createHolidayRangeRecord, resolveSchedulesForDate } = await import(
+    './piketLogic'
+  );
+
+  const gerbangSch: PiketSchedule = {
+    ...dailySchedule,
+    id: 'sch-gerbang-auto',
+    title: 'Jadwal Jaga Gerbang',
+    startTime: '06:00',
+    endTime: '09:15',
+    dailyMembers: ['m1', 'm2'],
+  };
+
+  // m1 has admin Hadir record; m2 did not attend
+  const records: AttendanceRecord[] = [
+    {
+      id: 'att-m1',
+      date: '2026-11-19',
+      scheduleId: 'sch-gerbang-auto',
+      memberId: 'm1',
+      status: 'hadir',
+      checkInTime: '06:35',
+      note: 'Diabsen langsung oleh Admin',
+      recordedBy: 'Verifikasi Admin: Developer Sistem OSIS',
+    },
+  ];
+
+  // 1. Today at 08:30 (still open): m2 is still belum_absen
+  const duringWindow = resolveSchedulesForDate(
+    '2026-11-19',
+    [gerbangSch],
+    sampleMembers,
+    [],
+    records,
+    { todayStr: '2026-11-19', currentTimeHHMM: '08:30' }
+  );
+  assert.equal(duringWindow[0].dutyMembers[0].effectiveStatus, 'hadir');
+  assert.equal(duringWindow[0].dutyMembers[1].effectiveStatus, 'belum_absen');
+  assert.equal(duringWindow[0].dutyMembers[1].isAutoAlfa, false);
+
+  // 2. Today at 09:20 (after 09:15 endTime): m2 automatically becomes Alfa (isAutoAlfa: true)
+  const afterWindow = resolveSchedulesForDate(
+    '2026-11-19',
+    [gerbangSch],
+    sampleMembers,
+    [],
+    records,
+    { todayStr: '2026-11-19', currentTimeHHMM: '09:20' }
+  );
+  assert.equal(afterWindow[0].dutyMembers[0].effectiveStatus, 'hadir');
+  assert.equal(afterWindow[0].dutyMembers[1].effectiveStatus, 'tidak_piket');
+  assert.equal(afterWindow[0].dutyMembers[1].isAutoAlfa, true);
+
+  // 3. Past date (2026-11-18) with no records: auto Alfa
+  const pastDay = resolveSchedulesForDate(
+    '2026-11-18',
+    [gerbangSch],
+    sampleMembers,
+    [],
+    [],
+    { todayStr: '2026-11-19', currentTimeHHMM: '08:00' }
+  );
+  assert.equal(pastDay[0].dutyMembers[0].effectiveStatus, 'tidak_piket');
+  assert.equal(pastDay[0].dutyMembers[0].isAutoAlfa, true);
+
+  // 4. Future date (2026-11-20): stays belum_absen
+  const futureDay = resolveSchedulesForDate(
+    '2026-11-20',
+    [gerbangSch],
+    sampleMembers,
+    [],
+    [],
+    { todayStr: '2026-11-19', currentTimeHHMM: '15:00' }
+  );
+  assert.equal(futureDay[0].dutyMembers[0].effectiveStatus, 'belum_absen');
+  assert.equal(futureDay[0].dutyMembers[0].isAutoAlfa, false);
+
+  // 5. Holiday date never triggers auto Alfa
+  const holidayRec = createHolidayRangeRecord(
+    'gerbang',
+    '2026-11-18',
+    '2026-11-18',
+    'Libur Sekolah',
+    'Verifikasi Admin: Developer'
+  );
+  const pastHoliday = resolveSchedulesForDate(
+    '2026-11-18',
+    [gerbangSch],
+    sampleMembers,
+    [],
+    [holidayRec],
+    { todayStr: '2026-11-19', currentTimeHHMM: '15:00' }
+  );
+  assert.equal(pastHoliday[0].dutyMembers[0].effectiveStatus, 'belum_absen');
+  assert.equal(pastHoliday[0].dutyMembers[0].isAutoAlfa, false);
+});
+
+test('calculates Weekly and Monthly Violation Leaderboard (Alfa=2 pts, Terlambat=1 pt) with periodic resets', async () => {
+  const { calculateViolationLeaderboard } = await import('./piketLogic');
+
+  const sch: PiketSchedule = {
+    ...weeklySchedule,
+    id: 'sch-lb-test',
+    title: 'Jadwal Jaga Gerbang',
+    startTime: '06:00',
+    endTime: '09:15',
+    activeDays: [1, 3, 4],
+    weeklyAssignments: {
+      1: ['m1', 'm2'], // Monday
+      3: ['m1', 'm3'], // Wednesday
+      4: ['m1', 'm2'], // Thursday
+    },
+  };
+
+  // Reference today: Thursday 2026-11-19 at 12:00 (after 09:15)
+  // Current week: Mon 2026-11-16 .. Sun 2026-11-22
+  // Previous week (still in Nov 2026): Mon 2026-11-09, Wed 2026-11-11, Thu 2026-11-12
+  const records: AttendanceRecord[] = [
+    // Current week:
+    // Mon Nov 16: m1 Hadir, m2 Terlambat (1 pt)
+    {
+      id: 'lb-1',
+      date: '2026-11-16',
+      scheduleId: 'sch-lb-test',
+      memberId: 'm1',
+      status: 'hadir',
+      checkInTime: '06:30',
+      note: '',
+      recordedBy: 'Verifikasi Admin: Dev',
+    },
+    {
+      id: 'lb-2',
+      date: '2026-11-16',
+      scheduleId: 'sch-lb-test',
+      memberId: 'm2',
+      status: 'terlambat',
+      checkInTime: '06:50',
+      note: '',
+      recordedBy: 'Verifikasi Admin: Dev',
+    },
+    // Wed Nov 18: m1 Terlambat (1 pt), m3 missing -> Auto Alfa (2 pts)
+    {
+      id: 'lb-3',
+      date: '2026-11-18',
+      scheduleId: 'sch-lb-test',
+      memberId: 'm1',
+      status: 'terlambat',
+      checkInTime: '06:55',
+      note: '',
+      recordedBy: 'Verifikasi Admin: Dev',
+    },
+    // Thu Nov 19: m1 Hadir, m2 Alfa (2 pts)
+    {
+      id: 'lb-4',
+      date: '2026-11-19',
+      scheduleId: 'sch-lb-test',
+      memberId: 'm1',
+      status: 'hadir',
+      checkInTime: '06:30',
+      note: '',
+      recordedBy: 'Verifikasi Admin: Dev',
+    },
+    {
+      id: 'lb-5',
+      date: '2026-11-19',
+      scheduleId: 'sch-lb-test',
+      memberId: 'm2',
+      status: 'tidak_piket',
+      checkInTime: '-',
+      note: 'Alfa',
+      recordedBy: 'Verifikasi Admin: Dev',
+    },
+  ];
+
+  // Weekly leaderboard (Nov 16..22):
+  // m2: 1 Alfa (2) + 1 Terlambat (1) = 3 pts (#1)
+  // m3: 1 Auto-Alfa (2) = 2 pts (#2)
+  // m1: 1 Terlambat (1) = 1 pt (#3)
+  const weekly = calculateViolationLeaderboard(
+    'mingguan',
+    '2026-11-19',
+    [sch],
+    sampleMembers,
+    [],
+    records,
+    { todayStr: '2026-11-19', currentTimeHHMM: '12:00' }
+  );
+  assert.equal(weekly.startDate, '2026-11-16');
+  assert.equal(weekly.endDate, '2026-11-22');
+  assert.equal(weekly.entries.length, 3);
+  assert.equal(weekly.entries[0].member.id, 'm2');
+  assert.equal(weekly.entries[0].points, 3);
+  assert.equal(weekly.entries[1].member.id, 'm3');
+  assert.equal(weekly.entries[1].points, 2);
+  assert.equal(weekly.entries[1].autoAlfaCount, 1);
+  assert.equal(weekly.entries[2].member.id, 'm1');
+  assert.equal(weekly.entries[2].points, 1);
+
+  // Monthly leaderboard (Nov 1..30) includes earlier unrecorded weeks in Nov (auto-Alfa) so totalPoints > weekly.totalPoints
+  const monthly = calculateViolationLeaderboard(
+    'bulanan',
+    '2026-11-19',
+    [sch],
+    sampleMembers,
+    [],
+    records,
+    { todayStr: '2026-11-19', currentTimeHHMM: '12:00' }
+  );
+  assert.equal(monthly.startDate, '2026-11-01');
+  assert.equal(monthly.endDate, '2026-11-30');
+  assert.equal(monthly.totalPoints > weekly.totalPoints, true);
+});
+
+test('toggles Violation Leaderboard visibility setting and filters metadata records from attendance logs', async () => {
+  const {
+    createLeaderboardSettingRecord,
+    createHolidayRangeRecord,
+    createDayAttendanceNoteRecord,
+    isLeaderboardFeatureEnabled,
+    isSystemMetadataAttendanceRecord,
+  } = await import('./piketLogic');
+
+  // Defaults to enabled when no setting record is stored yet
+  assert.equal(isLeaderboardFeatureEnabled([]), true);
+
+  const disabledSetting = createLeaderboardSettingRecord(
+    false,
+    'Verifikasi Admin: Developer Sistem OSIS'
+  );
+  assert.equal(isLeaderboardFeatureEnabled([disabledSetting]), false);
+  assert.equal(isSystemMetadataAttendanceRecord(disabledSetting), true);
+
+  const enabledSetting = createLeaderboardSettingRecord(
+    true,
+    'Verifikasi Admin: Developer Sistem OSIS'
+  );
+  assert.equal(isLeaderboardFeatureEnabled([enabledSetting]), true);
+
+  const holidayRec = createHolidayRangeRecord(
+    'warsis',
+    '2026-11-19',
+    '2026-11-20',
+    'Libur Semester',
+    'Verifikasi Admin: Developer Sistem OSIS'
+  );
+  const dayNoteRec = createDayAttendanceNoteRecord(
+    '2026-11-19',
+    'Rapat Guru',
+    true,
+    'Verifikasi Admin: Developer Sistem OSIS'
+  );
+  const normalRec: AttendanceRecord = {
+    id: 'att-2026-11-19-sch-1-m1',
+    date: '2026-11-19',
+    scheduleId: 'sch-1',
+    memberId: 'm1',
+    status: 'hadir',
+    checkInTime: '06:30',
+    note: 'Diabsen langsung oleh Admin',
+    recordedBy: 'Verifikasi Admin: Developer Sistem OSIS',
+  };
+
+  assert.equal(isSystemMetadataAttendanceRecord(holidayRec), true);
+  assert.equal(isSystemMetadataAttendanceRecord(dayNoteRec), true);
+  assert.equal(isSystemMetadataAttendanceRecord(normalRec), false);
+});
+
+
+
+
 

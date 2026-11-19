@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
-import { X, ArrowLeftRight } from 'lucide-react';
+import { X, ArrowLeftRight, Lock } from 'lucide-react';
 import {
   DAY_NAMES_ID,
   getBaseMemberIdsForScheduleOnDate,
+  getScheduleDateEditStatus,
   parseDateString,
   type OsisMember,
   type PiketSchedule,
@@ -10,6 +11,7 @@ import {
 } from '../utils/piketLogic';
 
 interface SwapScheduleModalProps {
+  todayStr: string;
   initialDate: string;
   initialScheduleId: string;
   initialOriginalMemberId?: string;
@@ -26,6 +28,7 @@ interface SwapScheduleModalProps {
 }
 
 export const SwapScheduleModal: React.FC<SwapScheduleModalProps> = ({
+  todayStr,
   initialDate,
   initialScheduleId,
   initialOriginalMemberId,
@@ -38,7 +41,7 @@ export const SwapScheduleModal: React.FC<SwapScheduleModalProps> = ({
   const [changeMode, setChangeMode] = useState<'sementara' | 'permanen'>(
     'sementara'
   );
-  const [date, setDate] = useState<string>(initialDate);
+  const [date, setDate] = useState<string>(initialDate || todayStr);
   const [scheduleId, setScheduleId] = useState<string>(
     initialScheduleId || schedules[0]?.id || ''
   );
@@ -66,8 +69,14 @@ export const SwapScheduleModal: React.FC<SwapScheduleModalProps> = ({
   );
   const [error, setError] = useState<string>('');
 
+  const dateEditStatus = getScheduleDateEditStatus(date, todayStr);
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (changeMode === 'sementara' && !dateEditStatus.canEdit) {
+      setError(dateEditStatus.reason);
+      return;
+    }
     if (!originalMemberId || !replacementMemberId) {
       setError('Pilih petugas asli dan petugas pengganti.');
       return;
@@ -111,15 +120,15 @@ export const SwapScheduleModal: React.FC<SwapScheduleModalProps> = ({
       aria-modal="true"
       aria-labelledby="swap-modal-title"
     >
-      <div className="card-3d max-w-lg w-full p-6 space-y-5">
-        <div className="flex items-center justify-between border-b-2 border-[#F3E3D0] pb-4">
+      <div className="bg-white border border-stone-200 rounded-xl shadow-xl max-w-lg w-full p-5 sm:p-6 space-y-4">
+        <div className="flex items-center justify-between border-b border-stone-200 pb-3.5">
           <div className="flex items-center gap-2">
-            <ArrowLeftRight className="w-4 h-4 text-orange-500" />
+            <ArrowLeftRight className="w-4 h-4 text-stone-700" />
             <h2
               id="swap-modal-title"
               className="text-base font-bold text-stone-900"
             >
-              Ganti / Tukar Jadwal Petugas Piket
+              Tukar / Ganti Petugas Piket
             </h2>
           </div>
           <button
@@ -134,28 +143,35 @@ export const SwapScheduleModal: React.FC<SwapScheduleModalProps> = ({
 
         <form onSubmit={handleSubmit} className="space-y-4">
           {error && (
-            <div className="p-3 bg-rose-50 border-2 border-rose-200 text-rose-700 text-xs font-bold rounded-xl">
+            <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold rounded-lg">
               {error}
             </div>
           )}
 
           {/* Switch between Temporary Date Swap and Permanent Schedule Change */}
-          <div className="flex items-center gap-1 p-1 bg-[#FFF3E0] rounded-xl">
+          <div className="flex items-center gap-1 p-1 bg-stone-100 rounded-lg">
             <button
               type="button"
-              onClick={() => setChangeMode('sementara')}
-              className={`flex-1 py-1.5 px-3 text-xs font-bold rounded-lg transition-colors ${
+              onClick={() => {
+                setChangeMode('sementara');
+                setDate(todayStr);
+                setError('');
+              }}
+              className={`flex-1 py-1.5 px-3 text-xs font-semibold rounded-md transition-colors ${
                 changeMode === 'sementara'
                   ? 'bg-white text-stone-900 shadow-xs'
                   : 'text-stone-600 hover:text-stone-900'
               }`}
             >
-              Tukar Sementara (1 Tanggal)
+              Tukar Hari Ini (Sementara)
             </button>
             <button
               type="button"
-              onClick={() => setChangeMode('permanen')}
-              className={`flex-1 py-1.5 px-3 text-xs font-bold rounded-lg transition-colors ${
+              onClick={() => {
+                setChangeMode('permanen');
+                setError('');
+              }}
+              className={`flex-1 py-1.5 px-3 text-xs font-semibold rounded-md transition-colors ${
                 changeMode === 'permanen'
                   ? 'bg-white text-stone-900 shadow-xs'
                   : 'text-stone-600 hover:text-stone-900'
@@ -165,11 +181,18 @@ export const SwapScheduleModal: React.FC<SwapScheduleModalProps> = ({
             </button>
           </div>
 
+          {changeMode === 'sementara' && !dateEditStatus.canEdit && (
+            <div className="p-2.5 bg-stone-100 border border-stone-200 rounded-lg text-xs text-stone-700 flex items-center gap-2">
+              <Lock className="w-3.5 h-3.5 text-stone-500 shrink-0" />
+              <span>{dateEditStatus.reason}</span>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label
                 htmlFor="swap-date-input"
-                className="block text-xs font-bold text-stone-700 mb-1"
+                className="block text-xs font-semibold text-stone-700 mb-1"
               >
                 Tanggal ({dayOfWeekName})
               </label>
@@ -177,10 +200,15 @@ export const SwapScheduleModal: React.FC<SwapScheduleModalProps> = ({
                 id="swap-date-input"
                 type="date"
                 value={date}
+                min={changeMode === 'sementara' ? todayStr : undefined}
+                max={changeMode === 'sementara' ? todayStr : undefined}
                 onChange={(e) => {
-                  if (e.target.value) setDate(e.target.value);
+                  if (e.target.value) {
+                    setDate(e.target.value);
+                    setError('');
+                  }
                 }}
-                className="w-full px-3 py-2 text-xs font-mono bg-white border-2 border-[#E7D5C0] rounded-xl"
+                className="w-full px-3 py-2 text-xs font-mono bg-white border border-stone-300 rounded-lg"
               />
             </div>
 

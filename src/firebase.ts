@@ -391,6 +391,73 @@ export async function seedOfficialSchedulesToDb(
   }
 }
 
+export async function syncOfficialScheduleTimeWindowsIfLegacy(
+  schedules: PiketSchedule[]
+): Promise<boolean> {
+  const legacyMappings: Array<{
+    prefix: string;
+    oldStart: string;
+    oldEnd: string;
+    newStart: string;
+    newEnd: string;
+  }> = [
+    {
+      prefix: 'sch-gerbang-',
+      oldStart: '06:15',
+      oldEnd: '07:00',
+      newStart: '06:00',
+      newEnd: '09:15',
+    },
+    {
+      prefix: 'sch-warsis-',
+      oldStart: '09:30',
+      oldEnd: '10:15',
+      newStart: '09:15',
+      newEnd: '14:15',
+    },
+    {
+      prefix: 'sch-shalat-',
+      oldStart: '11:45',
+      oldEnd: '12:30',
+      newStart: '11:45',
+      newEnd: '16:00',
+    },
+  ];
+
+  const toUpdate: PiketSchedule[] = [];
+  for (const s of schedules) {
+    const match = legacyMappings.find(
+      (m) =>
+        s.id.startsWith(m.prefix) &&
+        s.startTime === m.oldStart &&
+        s.endTime === m.oldEnd
+    );
+    if (match) {
+      toUpdate.push(
+        sanitizeScheduleForDb({
+          ...s,
+          startTime: match.newStart,
+          endTime: match.newEnd,
+        })
+      );
+    }
+  }
+
+  if (toUpdate.length === 0) return false;
+
+  try {
+    const batch = writeBatch(db);
+    for (const s of toUpdate) {
+      batch.set(doc(db, 'schedules', s.id), s);
+    }
+    await batch.commit();
+    return true;
+  } catch (err) {
+    console.error('Failed to sync official schedule time windows:', err);
+    return false;
+  }
+}
+
 export { collection, onSnapshot };
 
 
