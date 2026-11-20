@@ -21,6 +21,7 @@ import {
   createDayAttendanceNoteRecord,
   createHolidayRangeRecord,
   createLeaderboardSettingRecord,
+  createTestingModeSettingRecord,
   formatAdminVerifierName,
   formatDateString,
   formatShortDateRangeId,
@@ -34,8 +35,10 @@ import {
   isAutoAlfaSlot,
   isFakeAttendanceRecord,
   isLeaderboardFeatureEnabled,
+  isTestingModeEnabled,
   isViolationAttendanceRecord,
   LEADERBOARD_SETTING_RECORD_ID,
+  TESTING_MODE_RECORD_ID,
   replaceMemberInSchedule,
   resolveSchedulesForDate,
   sanitizeScheduleForDb,
@@ -541,8 +544,11 @@ export default function App() {
     showToast('Anda telah keluar dari Admin Panel.');
   };
 
-  // Resolve active schedules for selectedDate and nextPreviewDate (with automatic Alfa after schedule end / past dates)
-  const autoAlfaContext = { todayStr, currentTimeHHMM };
+  // Mode Uji Coba (Tanpa Batasan Waktu — synced via Firestore)
+  const isTestingMode = isTestingModeEnabled(attendanceRecords);
+
+  // Resolve active schedules for selectedDate and nextPreviewDate (with automatic Alfa after schedule end / past dates, paused in Mode Uji Coba)
+  const autoAlfaContext = { todayStr, currentTimeHHMM, isTestingMode };
 
   const resolvedTodaySchedules = resolveSchedulesForDate(
     selectedDate,
@@ -571,7 +577,7 @@ export default function App() {
     checkInTime: string,
     note: string
   ) => {
-    const editStatus = getScheduleDateEditStatus(date, todayStr);
+    const editStatus = getScheduleDateEditStatus(date, todayStr, isTestingMode);
     if (!editStatus.canEdit) {
       showToast(editStatus.reason);
       return;
@@ -595,7 +601,11 @@ export default function App() {
       const nowHHMM = `${String(now.getHours()).padStart(2, '0')}:${String(
         now.getMinutes()
       ).padStart(2, '0')}`;
-      const windowStatus = getPosAttendanceWindowStatus(targetSchedule, nowHHMM);
+      const windowStatus = getPosAttendanceWindowStatus(
+        targetSchedule,
+        nowHHMM,
+        isTestingMode
+      );
       if (!windowStatus.isOpen) {
         showToast(windowStatus.message);
         return;
@@ -649,7 +659,7 @@ export default function App() {
     status: AttendanceStatus,
     note?: string
   ) => {
-    const editStatus = getScheduleDateEditStatus(date, todayStr);
+    const editStatus = getScheduleDateEditStatus(date, todayStr, isTestingMode);
     if (!editStatus.canEdit) {
       showToast(editStatus.reason);
       return;
@@ -761,7 +771,7 @@ export default function App() {
     scheduleId: string,
     memberId: string
   ) => {
-    const editStatus = getScheduleDateEditStatus(date, todayStr);
+    const editStatus = getScheduleDateEditStatus(date, todayStr, isTestingMode);
     if (!editStatus.canEdit) {
       showToast(editStatus.reason);
       return;
@@ -811,8 +821,22 @@ export default function App() {
     );
   };
 
+  const handleToggleTestingMode = async (nextEnabled: boolean) => {
+    const recorderName = formatAdminVerifierName(loggedInAccount?.displayName);
+    const hasExisting = attendanceRecords.some(
+      (r) => r.id === TESTING_MODE_RECORD_ID
+    );
+    const payload = createTestingModeSettingRecord(nextEnabled, recorderName);
+    await runDbAction(
+      () => saveAttendanceToDb(payload, hasExisting),
+      nextEnabled
+        ? 'Mode Uji Coba AKTIF: Semua batasan jam pos, tanggal, dan toleransi 06:45 dinonaktifkan sementara.'
+        : 'Mode Uji Coba NONAKTIF: Seluruh aturan jam & tanggal normal kembali berlaku.'
+    );
+  };
+
   const handleMarkAllPresent = async (date: string, scheduleId: string) => {
-    const editStatus = getScheduleDateEditStatus(date, todayStr);
+    const editStatus = getScheduleDateEditStatus(date, todayStr, isTestingMode);
     if (!editStatus.canEdit) {
       showToast(editStatus.reason);
       return;
@@ -898,7 +922,7 @@ export default function App() {
     applyToAllMembers: boolean,
     targetScheduleId: string = DAY_NOTE_SCHEDULE_ID
   ) => {
-    const editStatus = getScheduleDateEditStatus(date, todayStr);
+    const editStatus = getScheduleDateEditStatus(date, todayStr, isTestingMode);
     if (!editStatus.canEdit) {
       showToast(editStatus.reason);
       return;
@@ -961,7 +985,7 @@ export default function App() {
     date: string,
     targetScheduleId: string = DAY_NOTE_SCHEDULE_ID
   ) => {
-    const editStatus = getScheduleDateEditStatus(date, todayStr);
+    const editStatus = getScheduleDateEditStatus(date, todayStr, isTestingMode);
     if (!editStatus.canEdit) {
       showToast(editStatus.reason);
       return;
@@ -993,7 +1017,7 @@ export default function App() {
       showToast('Alasan libur piket wajib diisi.');
       return;
     }
-    if (startDate < todayStr) {
+    if (!isTestingMode && startDate < todayStr) {
       showToast('Tanggal mulai libur piket tidak boleh di hari yang sudah berlalu.');
       return;
     }
@@ -1071,7 +1095,11 @@ export default function App() {
   };
 
   const handleSaveTemporarySwap = async (swap: ScheduleSwap) => {
-    const editStatus = getScheduleDateEditStatus(swap.date, todayStr);
+    const editStatus = getScheduleDateEditStatus(
+      swap.date,
+      todayStr,
+      isTestingMode
+    );
     if (!editStatus.canEdit) {
       showToast(editStatus.reason);
       return;
@@ -1460,6 +1488,7 @@ export default function App() {
             swaps={swaps}
             attendanceRecords={attendanceRecords}
             isLeaderboardEnabled={isLeaderboardEnabled}
+            isTestingMode={isTestingMode}
             onPublicRecordAttendance={handlePublicRecordAttendance}
           />
         )}
@@ -1479,6 +1508,8 @@ export default function App() {
             attendanceRecords={attendanceRecords}
             isLeaderboardEnabled={isLeaderboardEnabled}
             onToggleLeaderboardEnabled={handleToggleLeaderboardEnabled}
+            isTestingMode={isTestingMode}
+            onToggleTestingMode={handleToggleTestingMode}
             onRecordAttendance={handleRecordAttendance}
             onClearAttendance={handleClearAttendance}
             onMarkAllPresent={handleMarkAllPresent}
@@ -1550,6 +1581,8 @@ export default function App() {
             accounts={accounts}
             violationRecordsCount={violationRecordsCount}
             violationResetCutoff={violationResetCutoff}
+            isTestingMode={isTestingMode}
+            onToggleTestingMode={handleToggleTestingMode}
             onAddAdminAccount={handleAddAdminAccount}
             onUpdateAccount={handleUpdateAdminAccount}
             onDeleteAdminAccount={(acc) => handleDeleteAdminAccount(acc.id)}
@@ -1586,6 +1619,7 @@ export default function App() {
       {swapModalState.isOpen && (
         <SwapScheduleModal
           todayStr={todayStr}
+          isTestingMode={isTestingMode}
           initialDate={swapModalState.date}
           initialScheduleId={swapModalState.scheduleId}
           initialOriginalMemberId={swapModalState.originalMemberId}

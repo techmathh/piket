@@ -4,6 +4,7 @@ import { Search, Trophy } from 'lucide-react';
 import {
   calculateViolationLeaderboard,
   getMemberOrgLabel,
+  isTestingModeEnabled,
   VIOLATION_POINTS_ALFA,
   VIOLATION_POINTS_TERLAMBAT,
   type AttendanceRecord,
@@ -37,6 +38,8 @@ export const ViolationLeaderboard: React.FC<ViolationLeaderboardProps> = ({
   const [orgFilter, setOrgFilter] = useState<'all' | 'OSIS' | 'MPK'>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
 
+  const isTestingMode = isTestingModeEnabled(attendanceRecords);
+
   const board = useMemo(
     () =>
       calculateViolationLeaderboard(
@@ -46,9 +49,18 @@ export const ViolationLeaderboard: React.FC<ViolationLeaderboardProps> = ({
         members,
         swaps,
         attendanceRecords,
-        { todayStr, currentTimeHHMM }
+        { todayStr, currentTimeHHMM, isTestingMode }
       ),
-    [period, todayStr, currentTimeHHMM, schedules, members, swaps, attendanceRecords]
+    [
+      period,
+      todayStr,
+      currentTimeHHMM,
+      isTestingMode,
+      schedules,
+      members,
+      swaps,
+      attendanceRecords,
+    ]
   );
 
   const filteredEntries = useMemo(() => {

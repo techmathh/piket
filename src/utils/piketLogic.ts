@@ -93,6 +93,7 @@ export interface ResolvedDutyMember {
 export interface AutoAlfaContext {
   todayStr: string;
   currentTimeHHMM: string;
+  isTestingMode?: boolean;
 }
 
 export interface ResolvedScheduleForDate {
@@ -605,6 +606,7 @@ export function isAutoAlfaSlot(
   attendanceRecords: AttendanceRecord[]
 ): boolean {
   if (!autoAlfaContext) return false;
+  if (autoAlfaContext.isTestingMode) return false;
   if (getHolidayForScheduleOnDate(dateStr, schedule.title, attendanceRecords)) {
     return false;
   }
@@ -1427,9 +1429,27 @@ export interface ScheduleDateEditStatus {
  */
 export function getScheduleDateEditStatus(
   targetDateStr: string,
-  todayStr: string
+  todayStr: string,
+  isTestingMode = false
 ): ScheduleDateEditStatus {
-  if (targetDateStr < todayStr) {
+  const state: ScheduleDateEditState =
+    targetDateStr < todayStr
+      ? 'past'
+      : targetDateStr > todayStr
+      ? 'future'
+      : 'today';
+
+  if (isTestingMode) {
+    return {
+      canEdit: true,
+      state,
+      label: 'Mode Uji Coba (Tanpa Batasan Waktu)',
+      reason:
+        'Mode Uji Coba aktif — absensi, verifikasi, dan perubahan jadwal dibuka untuk semua tanggal tanpa batasan waktu.',
+    };
+  }
+
+  if (state === 'past') {
     return {
       canEdit: false,
       state: 'past',
@@ -1438,7 +1458,7 @@ export function getScheduleDateEditStatus(
         'Jadwal yang sudah berlalu bersifat arsip dan tidak dapat diedit oleh admin maupun pengguna.',
     };
   }
-  if (targetDateStr > todayStr) {
+  if (state === 'future') {
     return {
       canEdit: false,
       state: 'future',
@@ -1550,12 +1570,24 @@ export interface PosAttendanceWindowStatus {
  */
 export function getPosAttendanceWindowStatus(
   schedule: Pick<PiketSchedule, 'title' | 'startTime' | 'endTime'>,
-  currentTimeHHMM: string
+  currentTimeHHMM: string,
+  isTestingMode = false
 ): PosAttendanceWindowStatus {
   const hhmm = (currentTimeHHMM || '07:00').slice(0, 5);
   const startTime = (schedule.startTime || '06:00').slice(0, 5);
   const endTime = (schedule.endTime || '16:00').slice(0, 5);
   const windowLabel = `${startTime} – ${endTime} WIB`;
+
+  if (isTestingMode) {
+    return {
+      isOpen: true,
+      state: 'open',
+      startTime,
+      endTime,
+      windowLabel,
+      message: `Mode Uji Coba aktif — absensi ${schedule.title} dibuka 24 jam tanpa batasan waktu.`,
+    };
+  }
 
   if (hhmm < startTime) {
     return {
@@ -1597,6 +1629,7 @@ export interface PublicAttendanceEvalInput {
   currentTimeHHMM: string; // "HH:mm"
   selectedSessions?: string[]; // e.g. ['dzuhur', 'ashar'] or ['istirahat1']
   izinReason?: string;
+  ignoreTimeRestrictions?: boolean;
 }
 
 export interface PublicAttendanceEvalResult {
@@ -1708,9 +1741,9 @@ export function evaluatePublicAttendanceSubmission(
     };
   }
 
-  // Jaga Gerbang tolerance check (max 06:45 WIB)
+  // Jaga Gerbang tolerance check (max 06:45 WIB; bypassed in Mode Uji Coba)
   if (rule.maxToleranceTime && input.choice === 'hadir') {
-    if (hhmm > rule.maxToleranceTime) {
+    if (!input.ignoreTimeRestrictions && hhmm > rule.maxToleranceTime) {
       return {
         valid: true,
         status: 'terlambat',
@@ -1723,7 +1756,9 @@ export function evaluatePublicAttendanceSubmission(
       valid: true,
       status: 'hadir',
       checkInTime: hhmm,
-      note: `Hadir tepat waktu (<= ${rule.maxToleranceTime} WIB)`,
+      note: input.ignoreTimeRestrictions
+        ? `Hadir (Mode Uji Coba — absen pukul ${hhmm} WIB)`
+        : `Hadir tepat waktu (<= ${rule.maxToleranceTime} WIB)`,
       autoDowngradedToLate: false,
     };
   }
@@ -2202,9 +2237,10 @@ export function calculateViolationLeaderboard(
       ? getWeekRange(referenceDateStr)
       : getMonthRange(referenceDateStr.slice(0, 7));
 
-  // Only evaluate up to todayStr so future dates never generate violations
+  // Only evaluate up to todayStr in normal mode so future dates never generate violations;
+  // in Mode Uji Coba, allow explicit violations recorded on any date in the active period.
   const effectiveEndDate =
-    range.endDate > autoAlfaContext.todayStr
+    !autoAlfaContext.isTestingMode && range.endDate > autoAlfaContext.todayStr
       ? autoAlfaContext.todayStr
       : range.endDate;
 
@@ -2315,6 +2351,8 @@ export function calculateViolationLeaderboard(
 export const APP_SETTING_SCHEDULE_ID = '__APP_SETTING__';
 export const LEADERBOARD_SETTING_MEMBER_ID = '__LEADERBOARD_ENABLED__';
 export const LEADERBOARD_SETTING_RECORD_ID = 'setting-leaderboard-enabled';
+export const TESTING_MODE_MEMBER_ID = '__TESTING_MODE_ENABLED__';
+export const TESTING_MODE_RECORD_ID = 'setting-testing-mode-enabled';
 export const VIOLATION_RESET_MEMBER_ID = '__VIOLATION_RESET_CUTOFF__';
 export const VIOLATION_RESET_RECORD_ID = 'setting-violation-reset-cutoff';
 
@@ -2329,6 +2367,7 @@ export function isSystemMetadataAttendanceRecord(
     record.memberId === DAY_NOTE_MEMBER_ID ||
     record.memberId === HOLIDAY_RANGE_MEMBER_ID ||
     record.memberId === LEADERBOARD_SETTING_MEMBER_ID ||
+    record.memberId === TESTING_MODE_MEMBER_ID ||
     record.memberId === VIOLATION_RESET_MEMBER_ID ||
     record.scheduleId === APP_SETTING_SCHEDULE_ID ||
     record.scheduleId === DAY_NOTE_SCHEDULE_ID ||
@@ -2535,6 +2574,42 @@ export function createLeaderboardSettingRecord(
     scheduleId: APP_SETTING_SCHEDULE_ID,
     memberId: LEADERBOARD_SETTING_MEMBER_ID,
     status: enabled ? 'hadir' : 'tidak_piket',
+    checkInTime: '-',
+    note: enabled ? 'true' : 'false',
+    recordedBy: (recordedBy || 'Verifikasi Admin: Admin OSIS').slice(0, 120),
+  };
+}
+
+/**
+ * Returns whether "Mode Uji Coba" (no time/date restrictions) is currently enabled.
+ * Defaults to `false` (normal strict time rules active).
+ */
+export function isTestingModeEnabled(
+  attendanceRecords: AttendanceRecord[]
+): boolean {
+  const setting = attendanceRecords.find(
+    (r) =>
+      r.id === TESTING_MODE_RECORD_ID ||
+      (r.scheduleId === APP_SETTING_SCHEDULE_ID &&
+        r.memberId === TESTING_MODE_MEMBER_ID)
+  );
+  if (!setting) return false;
+  return setting.note.trim().toLowerCase() === 'true';
+}
+
+/**
+ * Builds a valid Firestore AttendanceRecord payload representing the Mode Uji Coba toggle.
+ */
+export function createTestingModeSettingRecord(
+  enabled: boolean,
+  recordedBy: string
+): AttendanceRecord {
+  return {
+    id: TESTING_MODE_RECORD_ID,
+    date: '2000-01-01',
+    scheduleId: APP_SETTING_SCHEDULE_ID,
+    memberId: TESTING_MODE_MEMBER_ID,
+    status: enabled ? 'hadir' : 'izin',
     checkInTime: '-',
     note: enabled ? 'true' : 'false',
     recordedBy: (recordedBy || 'Verifikasi Admin: Admin OSIS').slice(0, 120),

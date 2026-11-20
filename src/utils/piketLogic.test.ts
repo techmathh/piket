@@ -1504,6 +1504,117 @@ test('clears historical Auto-Alfa and resets Violation Leaderboard to 0 after De
   assert.equal(nextDayBoard.totalPoints, 2);
 });
 
+test('Mode Uji Coba (tanpa batasan waktu) persists via metadata and bypasses date locks, pos windows, Gerbang 06:45 tolerance, and Auto-Alfa', async () => {
+  const {
+    createTestingModeSettingRecord,
+    isTestingModeEnabled,
+    isSystemMetadataAttendanceRecord,
+    isViolationAttendanceRecord,
+    getScheduleDateEditStatus,
+    getPosAttendanceWindowStatus,
+    evaluatePublicAttendanceSubmission,
+    isAutoAlfaSlot,
+    calculateViolationLeaderboard,
+  } = await import('./piketLogic');
+
+  // Defaults to false when no setting record exists
+  assert.equal(isTestingModeEnabled([]), false);
+
+  const onRec = createTestingModeSettingRecord(
+    true,
+    'Verifikasi Admin: Developer Sistem OSIS'
+  );
+  assert.equal(isSystemMetadataAttendanceRecord(onRec), true);
+  assert.equal(isViolationAttendanceRecord(onRec), false);
+  assert.equal(isTestingModeEnabled([onRec]), true);
+
+  const offRec = createTestingModeSettingRecord(
+    false,
+    'Verifikasi Admin: Developer Sistem OSIS'
+  );
+  assert.equal(isTestingModeEnabled([offRec]), false);
+
+  // Date locks: past & future dates are unlocked when isTestingMode = true
+  assert.equal(getScheduleDateEditStatus('2026-11-10', '2026-11-19', false).canEdit, false);
+  assert.equal(getScheduleDateEditStatus('2026-11-25', '2026-11-19', false).canEdit, false);
+  assert.equal(getScheduleDateEditStatus('2026-11-10', '2026-11-19', true).canEdit, true);
+  assert.equal(getScheduleDateEditStatus('2026-11-25', '2026-11-19', true).canEdit, true);
+
+  // Pos windows: 02:00 and 23:30 WIB are open when isTestingMode = true
+  const gerbangShift: PiketSchedule = {
+    id: 'sch-gerbang-test',
+    title: 'Jaga Gerbang',
+    description: 'Jaga Gerbang',
+    location: 'Gerbang Utama',
+    startTime: '06:00',
+    endTime: '09:15',
+    mode: 'mingguan',
+    tasks: ['Jaga'],
+    activeDays: [1, 2, 3, 4, 5],
+    dailyMembers: [],
+    weeklyAssignments: { 4: ['m1'], 5: ['m1'] },
+    customDates: [],
+    customDateAssignments: {},
+  };
+
+  assert.equal(getPosAttendanceWindowStatus(gerbangShift, '23:30', false).isOpen, false);
+  assert.equal(getPosAttendanceWindowStatus(gerbangShift, '02:00', true).isOpen, true);
+  assert.equal(getPosAttendanceWindowStatus(gerbangShift, '23:30', true).isOpen, true);
+
+  // Jaga Gerbang 06:45 tolerance: bypassed when ignoreTimeRestrictions = true
+  const normalLate = evaluatePublicAttendanceSubmission({
+    scheduleTitle: 'Jaga Gerbang',
+    choice: 'hadir',
+    currentTimeHHMM: '21:15',
+    ignoreTimeRestrictions: false,
+  });
+  assert.equal(normalLate.status, 'terlambat');
+  assert.equal(normalLate.autoDowngradedToLate, true);
+
+  const testingOnTime = evaluatePublicAttendanceSubmission({
+    scheduleTitle: 'Jaga Gerbang',
+    choice: 'hadir',
+    currentTimeHHMM: '21:15',
+    ignoreTimeRestrictions: true,
+  });
+  assert.equal(testingOnTime.status, 'hadir');
+  assert.equal(testingOnTime.autoDowngradedToLate, false);
+
+  // Auto-Alfa is paused during Mode Uji Coba
+  assert.equal(
+    isAutoAlfaSlot(
+      '2026-11-19',
+      gerbangShift,
+      { todayStr: '2026-11-19', currentTimeHHMM: '21:00', isTestingMode: true },
+      [onRec]
+    ),
+    false
+  );
+
+  // Explicit future-date violation recorded during Mode Uji Coba still appears on Leaderboard
+  const explicitTomorrowAlfa: AttendanceRecord = {
+    id: 'att-2026-11-20-sch-gerbang-test-m1',
+    date: '2026-11-20',
+    scheduleId: 'sch-gerbang-test',
+    memberId: 'm1',
+    status: 'tidak_piket',
+    checkInTime: '-',
+    note: 'Alfa uji coba',
+    recordedBy: 'Verifikasi Admin: Developer Sistem OSIS',
+  };
+  const board = calculateViolationLeaderboard(
+    'mingguan',
+    '2026-11-19',
+    [gerbangShift],
+    sampleMembers,
+    [],
+    [onRec, explicitTomorrowAlfa],
+    { todayStr: '2026-11-19', currentTimeHHMM: '21:00', isTestingMode: true }
+  );
+  assert.equal(board.totalViolators, 1);
+  assert.equal(board.totalPoints, 2);
+});
+
 
 
 

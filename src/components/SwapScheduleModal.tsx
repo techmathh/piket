@@ -13,6 +13,7 @@ import {
 
 interface SwapScheduleModalProps {
   todayStr: string;
+  isTestingMode?: boolean;
   initialDate: string;
   initialScheduleId: string;
   initialOriginalMemberId?: string;
@@ -38,6 +39,7 @@ function formatScheduleOptionLabel(s: PiketSchedule): string {
 
 export const SwapScheduleModal: React.FC<SwapScheduleModalProps> = ({
   todayStr,
+  isTestingMode = false,
   initialDate,
   initialScheduleId,
   initialOriginalMemberId,
@@ -104,7 +106,11 @@ export const SwapScheduleModal: React.FC<SwapScheduleModalProps> = ({
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
-  const dateEditStatus = getScheduleDateEditStatus(date, todayStr);
+  const dateEditStatus = getScheduleDateEditStatus(
+    date,
+    todayStr,
+    isTestingMode
+  );
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -246,8 +252,16 @@ export const SwapScheduleModal: React.FC<SwapScheduleModalProps> = ({
                 id="swap-date-input"
                 type="date"
                 value={date}
-                min={changeMode === 'sementara' ? todayStr : undefined}
-                max={changeMode === 'sementara' ? todayStr : undefined}
+                min={
+                  changeMode === 'sementara' && !isTestingMode
+                    ? todayStr
+                    : undefined
+                }
+                max={
+                  changeMode === 'sementara' && !isTestingMode
+                    ? todayStr
+                    : undefined
+                }
                 onChange={(e) => {
                   if (e.target.value) {
                     setDate(e.target.value);

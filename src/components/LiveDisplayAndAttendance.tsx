@@ -17,6 +17,7 @@ import {
   X,
   RotateCcw,
   Trophy,
+  FlaskConical,
 } from 'lucide-react';
 import {
   DAY_ATTENDANCE_NOTE_PRESETS,
@@ -73,6 +74,8 @@ interface LiveDisplayAndAttendanceProps {
   attendanceRecords: AttendanceRecord[];
   isLeaderboardEnabled: boolean;
   onToggleLeaderboardEnabled: (nextEnabled: boolean) => void;
+  isTestingMode: boolean;
+  onToggleTestingMode: (nextEnabled: boolean) => void;
   onRecordAttendance: (
     date: string,
     scheduleId: string,
@@ -124,6 +127,8 @@ export const LiveDisplayAndAttendance: React.FC<
   attendanceRecords,
   isLeaderboardEnabled,
   onToggleLeaderboardEnabled,
+  isTestingMode,
+  onToggleTestingMode,
   onRecordAttendance,
   onClearAttendance,
   onMarkAllPresent,
@@ -167,7 +172,11 @@ export const LiveDisplayAndAttendance: React.FC<
   const [holidayFormError, setHolidayFormError] = useState<string>('');
   const [isSavingHoliday, setIsSavingHoliday] = useState<boolean>(false);
 
-  const dateEditStatus = getScheduleDateEditStatus(selectedDate, todayStr);
+  const dateEditStatus = getScheduleDateEditStatus(
+    selectedDate,
+    todayStr,
+    isTestingMode
+  );
 
   useEffect(() => {
     const updateClock = () => {
@@ -266,7 +275,7 @@ export const LiveDisplayAndAttendance: React.FC<
       setHolidayFormError('Alasan libur piket wajib diisi.');
       return;
     }
-    if (holidayStartDate < todayStr) {
+    if (!isTestingMode && holidayStartDate < todayStr) {
       setHolidayFormError(
         'Tanggal mulai libur tidak boleh di hari yang sudah berlalu.'
       );
@@ -558,6 +567,26 @@ export const LiveDisplayAndAttendance: React.FC<
 
             <button
               type="button"
+              data-testid="btn-toggle-testing-mode"
+              aria-pressed={isTestingMode}
+              onClick={() => onToggleTestingMode(!isTestingMode)}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-lg border transition-all whitespace-nowrap ${
+                isTestingMode
+                  ? 'border-indigo-400 bg-indigo-600 text-white shadow-[0_2px_0_0_#3730A3] hover:-translate-y-0.5'
+                  : 'btn-3d-secondary text-slate-600'
+              }`}
+              title={
+                isTestingMode
+                  ? 'Mode Uji Coba sedang aktif (tanpa batasan jam & tanggal). Klik untuk menonaktifkan.'
+                  : 'Aktifkan Mode Uji Coba agar absensi & verifikasi bisa diuji kapan saja tanpa batasan waktu.'
+              }
+            >
+              <FlaskConical className="w-3.5 h-3.5" />
+              <span>Uji Coba: {isTestingMode ? 'Aktif' : 'Nonaktif'}</span>
+            </button>
+
+            <button
+              type="button"
               data-testid="btn-toggle-leaderboard-feature"
               aria-pressed={isLeaderboardEnabled}
               onClick={() => onToggleLeaderboardEnabled(!isLeaderboardEnabled)}
@@ -608,6 +637,32 @@ export const LiveDisplayAndAttendance: React.FC<
             </button>
           </div>
         </div>
+
+        {/* Active Mode Uji Coba Banner */}
+        {isTestingMode && (
+          <div
+            data-testid="admin-testing-mode-banner"
+            className="p-3 rounded-lg bg-indigo-50 border border-indigo-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-indigo-900"
+          >
+            <div className="flex items-center gap-2">
+              <FlaskConical className="w-4 h-4 text-indigo-600 shrink-0" />
+              <span>
+                <strong className="text-indigo-950">
+                  Mode Uji Coba Aktif (Tanpa Batasan Waktu):
+                </strong>{' '}
+                Absensi publik, verifikasi, dan tukar jadwal terbuka 24 jam
+                untuk semua tanggal & pos piket.
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => onToggleTestingMode(false)}
+              className="px-3 py-1 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white font-semibold whitespace-nowrap self-start sm:self-auto"
+            >
+              Nonaktifkan
+            </button>
+          </div>
+        )}
 
         {/* Strict Date Lock Banner for Past / Future Dates */}
         {!dateEditStatus.canEdit && (
@@ -785,7 +840,7 @@ export const LiveDisplayAndAttendance: React.FC<
                     id="holiday-start-date"
                     data-testid="input-holiday-start-date"
                     type="date"
-                    min={todayStr}
+                    min={isTestingMode ? undefined : todayStr}
                     value={holidayStartDate}
                     onChange={(e) => {
                       const val = e.target.value;

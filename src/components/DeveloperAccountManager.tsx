@@ -13,6 +13,7 @@ import {
   Database,
   AlertTriangle,
   RotateCcw,
+  FlaskConical,
 } from 'lucide-react';
 import {
   PERMANENT_DEVELOPER_ACCOUNT,
@@ -27,6 +28,8 @@ interface DeveloperAccountManagerProps {
   currentAccount: AppAccount;
   violationRecordsCount: number;
   violationResetCutoff: ViolationResetCutoff | null;
+  isTestingMode: boolean;
+  onToggleTestingMode: (nextEnabled: boolean) => Promise<void> | void;
   onAddAdminAccount: (newAccount: AppAccount) => Promise<void>;
   onUpdateAccount: (updatedAccount: AppAccount) => Promise<void>;
   onDeleteAdminAccount: (account: AppAccount) => Promise<void>;
@@ -41,6 +44,8 @@ export const DeveloperAccountManager: React.FC<
   currentAccount,
   violationRecordsCount,
   violationResetCutoff,
+  isTestingMode,
+  onToggleTestingMode,
   onAddAdminAccount,
   onUpdateAccount,
   onDeleteAdminAccount,
@@ -492,6 +497,71 @@ export const DeveloperAccountManager: React.FC<
           </div>
         </section>
       </div>
+
+      {/* Mode Uji Coba (Tanpa Batasan Waktu) Card */}
+      <section
+        data-testid="card-dev-testing-mode"
+        className={`card-3d p-5 md:p-6 flex flex-col md:flex-row md:items-center justify-between gap-4 ${
+          isTestingMode
+            ? 'border-indigo-300 bg-indigo-50/40'
+            : 'border-slate-200/90'
+        }`}
+      >
+        <div className="flex items-start gap-3.5 min-w-0">
+          <div
+            className={`w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 ${
+              isTestingMode
+                ? 'bg-indigo-600 border-indigo-700 text-white shadow-[0_3px_0_0_#3730A3]'
+                : 'bg-indigo-50 border-indigo-200 text-indigo-700'
+            }`}
+          >
+            <FlaskConical className="w-5 h-5" />
+          </div>
+          <div className="space-y-1 min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-base font-bold text-slate-900">
+                Mode Uji Coba (Tanpa Batasan Waktu)
+              </h2>
+              <span
+                data-testid="dev-testing-mode-status"
+                className={`px-2 py-0.5 rounded-lg text-[11px] font-bold border ${
+                  isTestingMode
+                    ? 'bg-indigo-600 text-white border-indigo-700'
+                    : 'bg-slate-100 text-slate-600 border-slate-200'
+                }`}
+              >
+                {isTestingMode ? 'AKTIF' : 'NONAKTIF'}
+              </span>
+            </div>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Saat aktif, semua batasan jam absen pos (Gerbang 06:00–09:15,
+              Warsis 09:15–14:15, Shalat 11:45–16:00), kunci tanggal
+              lampau/mendatang, batas toleransi 06:45 WIB, dan Otomatis Alfa
+              dinonaktifkan sementara agar semua alur dapat diuji kapan saja di
+              semua perangkat.
+            </p>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          data-testid="btn-dev-toggle-testing-mode"
+          aria-pressed={isTestingMode}
+          onClick={() => onToggleTestingMode(!isTestingMode)}
+          className={`px-4 py-2.5 text-xs font-bold rounded-xl border transition-all whitespace-nowrap shrink-0 inline-flex items-center justify-center gap-2 ${
+            isTestingMode
+              ? 'bg-indigo-600 hover:bg-indigo-700 border-indigo-700 text-white shadow-[0_3px_0_0_#3730A3] active:translate-y-0.5'
+              : 'btn-3d-primary'
+          }`}
+        >
+          <FlaskConical className="w-4 h-4" />
+          <span>
+            {isTestingMode
+              ? 'Nonaktifkan Mode Uji Coba'
+              : 'Aktifkan Mode Uji Coba'}
+          </span>
+        </button>
+      </section>
 
       {/* Developer-Only Database Management & Reset Section */}
       <section
